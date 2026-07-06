@@ -234,3 +234,19 @@ func TestGitCommitWorksWithoutHostIdentity(t *testing.T) {
 		t.Fatalf("commit failed without a host git identity: %v", err)
 	}
 }
+
+// Issue #16: task.commit must refuse while a job bound to the task is running.
+func TestTaskCommitRefusesWhileJobRunning(t *testing.T) {
+	svc, root := testService(t)
+	tid := "20200101T000000-cccccccccccc"
+	if err := svc.writeTask(TaskRecord{ID: tid, Project: "p", State: "active", Workspace: "test", Worktree: filepath.Join(root, "wt"), Branch: "anigate/x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.jobs.writeRecord(JobRecord{ID: "20200101T000000-dddddddddddd", State: JobRunning, TaskID: tid, StartedAt: time.Now().UTC(), LogPath: filepath.Join(root, "j.log")}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.taskCommit(map[string]any{"task_id": tid, "message": "m", "expected_diff_sha256": "x"})
+	if err == nil || !strings.Contains(err.Error(), "running job") {
+		t.Fatalf("expected refusal while a task job is running, got %v", err)
+	}
+}

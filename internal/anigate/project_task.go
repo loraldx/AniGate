@@ -364,6 +364,14 @@ func (s *Service) taskCommit(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Refuse to commit while a job (e.g. an async agent turn) bound to this task
+	// is still writing to the worktree; otherwise `git add -A` could stage
+	// in-flight, unpreviewed edits that were never fingerprinted.
+	if running, err := s.taskHasRunningJob(task.ID); err != nil {
+		return nil, err
+	} else if running {
+		return nil, fmt.Errorf("task has a running job; wait for it to finish before committing")
+	}
 	message := strings.TrimSpace(stringArg(args, "message"))
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
@@ -678,6 +686,19 @@ func (s *Service) taskChangeFingerprint(task TaskRecord) (string, error) {
 		b.WriteString(sha256Hex(content))
 	}
 	return sha256Hex([]byte(b.String())), nil
+}
+
+func (s *Service) taskHasRunningJob(taskID string) (bool, error) {
+	jobs, err := s.jobs.List(200, JobRunning)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.TaskID == taskID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func taskHasPendingChanges(worktree string) bool {
