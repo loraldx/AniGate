@@ -408,18 +408,14 @@ func (s *Service) taskTimeline(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid task_id")
 	}
 	limit := intArgDefault(args, "limit", 50)
-	events, err := s.events.Tail(200, EventFilter{})
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	// Filter by task_id during the scan so the window applies to this task's
+	// events, not the last N events across every task and tool.
+	selected, err := s.events.Tail(limit, EventFilter{TaskID: taskID})
 	if err != nil {
 		return nil, err
-	}
-	var selected []Event
-	for _, ev := range events {
-		if ev.Fields != nil && ev.Fields["task_id"] == taskID {
-			selected = append(selected, ev)
-		}
-	}
-	if len(selected) > limit {
-		selected = selected[len(selected)-limit:]
 	}
 	return map[string]any{"task_id": taskID, "events": selected, "count": len(selected)}, nil
 }

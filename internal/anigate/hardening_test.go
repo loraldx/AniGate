@@ -133,3 +133,27 @@ func TestAuditSummaryCoversWholeWindow(t *testing.T) {
 		t.Fatalf("expected >= %d failures counted, got %d", n, got)
 	}
 }
+
+// Issue #10: a task's timeline must survive a flood of unrelated events.
+func TestTaskTimelineSurvivesUnrelatedActivity(t *testing.T) {
+	svc, _ := testService(t)
+	tid := "20200101T000000-bbbbbbbbbbbb"
+	if err := svc.events.Append(Event{Kind: "task_started", Tool: "task.start", OK: true, Fields: map[string]any{"task_id": tid}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 300; i++ {
+		if err := svc.events.Append(Event{Kind: "tool_call", Tool: "fs.read", OK: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.events.Append(Event{Kind: "task_committed", Tool: "task.commit", OK: true, Fields: map[string]any{"task_id": tid}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.taskTimeline(map[string]any{"task_id": tid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["count"].(int) != 2 {
+		t.Fatalf("expected both task events retrievable after unrelated flood, got %v", got["count"])
+	}
+}
