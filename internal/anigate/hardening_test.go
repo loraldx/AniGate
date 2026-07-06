@@ -215,3 +215,22 @@ func TestResolveRejectsNewFileUnderEscapingSymlink(t *testing.T) {
 		t.Fatalf("normal new path should resolve: %v", err)
 	}
 }
+
+// Issue #15: git commit must succeed even though the subprocess env is stripped
+// of the host's git identity (no HOME).
+func TestGitCommitWorksWithoutHostIdentity(t *testing.T) {
+	dir := t.TempDir()
+	if err := runGitExternal(dir, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(dir, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	// runGitExternal strips HOME, so this only works if AniGate injects an identity.
+	if err := runGitExternal(dir, "commit", "-m", "bootstrap"); err != nil {
+		t.Fatalf("commit failed without a host git identity: %v", err)
+	}
+}

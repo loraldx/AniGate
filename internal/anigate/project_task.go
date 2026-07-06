@@ -749,12 +749,30 @@ func runGitExternal(cwd string, args ...string) error {
 	return err
 }
 
+// gitIdentityEnv supplies a default author/committer identity for git
+// subprocesses, whose environment is otherwise stripped of HOME and GIT_* vars.
+func gitIdentityEnv() []string {
+	return []string{
+		"GIT_AUTHOR_NAME=AniGate",
+		"GIT_AUTHOR_EMAIL=anigate@localhost",
+		"GIT_COMMITTER_NAME=AniGate",
+		"GIT_COMMITTER_EMAIL=anigate@localhost",
+	}
+}
+
 func runExternalOutput(cwd, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = cwd
-	cmd.Env = []string{"PATH=" + pathEnv()}
+	env := []string{"PATH=" + pathEnv()}
+	if name == "git" {
+		// The subprocess env is stripped (no HOME), so git cannot read the
+		// user's global identity. Provide a default bot identity so task.commit
+		// works out of the box instead of failing with "empty ident name".
+		env = append(env, gitIdentityEnv()...)
+	}
+	cmd.Env = env
 	b, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("%s command timed out", name)
