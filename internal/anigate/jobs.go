@@ -222,6 +222,35 @@ func (m *JobManager) List(limit int, state JobState) ([]JobRecord, error) {
 	return jobs, nil
 }
 
+// Count returns the number of job records (optionally filtered by state)
+// without the per-call limit clamp that List applies, so internal aggregators
+// (context.health, gate.stats) report accurate totals.
+func (m *JobManager) Count(state JobState) (int, error) {
+	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if state == "" {
+			count++
+			continue
+		}
+		rec, err := m.Status(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil || rec.State != state {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 func (m *JobManager) Cancel(id string) (JobRecord, error) {
 	if !validName(id) {
 		return JobRecord{}, errors.New("invalid job id")

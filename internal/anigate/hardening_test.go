@@ -250,3 +250,24 @@ func TestTaskCommitRefusesWhileJobRunning(t *testing.T) {
 		t.Fatalf("expected refusal while a task job is running, got %v", err)
 	}
 }
+
+// Issue #18: internal job counts must not be capped at 50.
+func TestJobCountNotClampedForInternalStats(t *testing.T) {
+	svc, root := testService(t)
+	for i := 0; i < 60; i++ {
+		id, err := newJobID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.jobs.writeRecord(JobRecord{ID: id, State: JobDone, StartedAt: time.Now().UTC(), LogPath: filepath.Join(root, "l.log")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := svc.gateStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats["jobs"].(int); got < 60 {
+		t.Fatalf("expected >= 60 jobs counted, got %d (clamped?)", got)
+	}
+}
