@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Issue #5: audit events must never be silently dropped.
@@ -56,5 +57,35 @@ func TestWritePreviewBoundsLargeFile(t *testing.T) {
 	}
 	if got["artifact"] == nil {
 		t.Fatal("expected an artifact ref for the spilled diff")
+	}
+}
+
+// Issue #7: a job left "running" by a crashed process is finalized when a new
+// manager boots over the same state dir.
+func TestReconcileInterruptedJobsOnStartup(t *testing.T) {
+	svc, _ := testService(t)
+	rec := JobRecord{
+		ID:        "20200101T000000-deadbeefcafe",
+		Kind:      "preset",
+		Preset:    "ghost",
+		State:     JobRunning,
+		StartedAt: time.Now().UTC().Add(-time.Hour),
+		Workspace: "test",
+		LogPath:   filepath.Join(svc.cfg.StateDir, "logs", "ghost.log"),
+	}
+	if err := svc.jobs.writeRecord(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Booting a fresh manager over the same state dir must reconcile the orphan.
+	jm, err := NewJobManager(svc.cfg, svc.policy, svc.events, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := jm.Status(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != JobFailed || !strings.Contains(got.Error, "interrupted") {
+		t.Fatalf("expected interrupted->failed, got state=%s err=%q", got.State, got.Error)
 	}
 }

@@ -79,7 +79,46 @@ func NewJobManager(cfg Config, policy pathPolicy, events *EventLog, log *slog.Lo
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "logs"), 0o700); err != nil {
 		return nil, err
 	}
-	return &JobManager{cfg: cfg, policy: policy, events: events, log: log, active: map[string]context.CancelFunc{}}, nil
+	m := &JobManager{cfg: cfg, policy: policy, events: events, log: log, active: map[string]context.CancelFunc{}}
+	m.reconcileInterruptedJobs()
+	return m, nil
+}
+
+// reconcileInterruptedJobs finalizes jobs left in "running" by a previous
+// process. A freshly constructed manager has an empty active map, so any
+// on-disk "running" record is an orphan from a crash/restart and can never be
+// finalized or cancelled otherwise. It is marked failed so status, cancel, and
+// context-health counters stop reporting a phantom running job.
+func (m *JobManager) reconcileInterruptedJobs() {
+	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		rec, err := m.Status(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil || rec.State != JobRunning {
+			continue
+		}
+		rec.State = JobFailed
+		rec.Error = "interrupted: anigate process restarted"
+		rec.ExitCode = -1
+		rec.FinishedAt = time.Now().UTC()
+		if err := m.writeRecord(rec); err != nil {
+			continue
+		}
+		_ = m.events.Append(Event{
+			Kind:      "job_finished",
+			JobID:     rec.ID,
+			Preset:    rec.Preset,
+			Workspace: rec.Workspace,
+			OK:        false,
+			Message:   rec.Error,
+			Fields:    map[string]any{"task_id": rec.TaskID, "reconciled": true},
+		})
+	}
 }
 
 func (m *JobManager) RunPreset(ctx context.Context, name string, args map[string]any, async bool) (JobRecord, string, error) {
