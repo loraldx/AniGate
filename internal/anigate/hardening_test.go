@@ -198,3 +198,20 @@ func TestFailedToolCallAuditIncludesContext(t *testing.T) {
 		t.Fatalf("audit event missing context: workspace=%q path=%q", found.Workspace, found.Path)
 	}
 }
+
+// Issue #14: a new path under an escaping symlink must be rejected, not just
+// checked lexically.
+func TestResolveRejectsNewFileUnderEscapingSymlink(t *testing.T) {
+	svc, root := testService(t)
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(filepath.Dir(root), link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if _, err := svc.policy.resolve("test", "escape/newfile"); err == nil {
+		t.Fatal("expected resolve to reject a new path under an escaping symlink")
+	}
+	// A normal not-yet-existing path inside the workspace still resolves.
+	if _, err := svc.policy.resolve("test", "sub/newfile"); err != nil {
+		t.Fatalf("normal new path should resolve: %v", err)
+	}
+}

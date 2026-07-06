@@ -66,6 +66,11 @@ func (p pathPolicy) resolve(workspaceName, requested string) (resolvedPath, erro
 		if realCandidate, err := filepath.EvalSymlinks(candidate); err == nil {
 			candidate = realCandidate
 		}
+	} else {
+		// The target does not exist yet, so EvalSymlinks can't resolve it.
+		// Resolve the deepest existing ancestor instead so a new file under an
+		// escaping symlink is still confined, not just checked lexically.
+		candidate = resolveDeepestExisting(candidate)
 	}
 	rel, err := filepath.Rel(root, candidate)
 	if err != nil {
@@ -75,4 +80,32 @@ func (p pathPolicy) resolve(workspaceName, requested string) (resolvedPath, erro
 		return resolvedPath{}, fmt.Errorf("path escapes workspace %q", ws.Name)
 	}
 	return resolvedPath{Workspace: ws, Abs: candidate, Rel: rel}, nil
+}
+
+// resolveDeepestExisting resolves the symlinks of the deepest existing ancestor
+// of path and re-attaches the remaining (non-existent) suffix. This makes
+// confinement of a not-yet-created path account for symlinked parents instead
+// of trusting the lexical path.
+func resolveDeepestExisting(path string) string {
+	path = filepath.Clean(path)
+	suffix := ""
+	cur := path
+	for {
+		if _, err := os.Stat(cur); err == nil {
+			real, err := filepath.EvalSymlinks(cur)
+			if err != nil {
+				real = cur
+			}
+			if suffix == "" {
+				return real
+			}
+			return filepath.Join(real, suffix)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		suffix = filepath.Join(filepath.Base(cur), suffix)
+		cur = parent
+	}
 }
