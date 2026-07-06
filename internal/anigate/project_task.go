@@ -293,7 +293,7 @@ func (s *Service) taskDigest(args map[string]any) (map[string]any, error) {
 	status, _ := s.runGitOutput(task.Worktree, "status", "--porcelain=v1", "--branch")
 	diffStat, _ := s.runGitOutput(task.Worktree, "diff", "--stat")
 	digest := strings.TrimSpace(fmt.Sprintf("Task %s (%s)\nProject: %s\nBranch: %s\nState: %s\nStatus:\n%s\nDiff stat:\n%s",
-		task.ID, task.Title, task.Project, task.Branch, task.State, status, diffStat))
+		task.ID, task.Title, task.Project, task.Branch, task.State, trimPreview(status, 4000), trimPreview(diffStat, 4000)))
 	return map[string]any{"task": task, "digest": digest}, nil
 }
 
@@ -311,7 +311,7 @@ func (s *Service) taskFinishPreview(args map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"task": task, "status": status, "diff": text, "truncated": truncated, "next": []string{"task.commit_preview", "handoff.create"}}
+	out := map[string]any{"task": task, "status": trimPreview(status, 4000), "diff": text, "truncated": truncated, "next": []string{"task.commit_preview", "handoff.create"}}
 	s.addArtifactFields(out, ref)
 	return out, nil
 }
@@ -347,9 +347,9 @@ func (s *Service) taskCommitPreview(args map[string]any) (map[string]any, error)
 	}
 	out := map[string]any{
 		"task":             task,
-		"status":           status,
+		"status":           trimPreview(status, 4000),
 		"diff":             text,
-		"diff_stat":        diffStat,
+		"diff_stat":        trimPreview(diffStat, 4000),
 		"diff_sha256":      fingerprint,
 		"proposed_message": message,
 		"truncated":        truncated,
@@ -472,8 +472,8 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 		"remote_url":    redactRemoteURL(project.RemoteURL),
 		"allow_push":    project.AllowPush,
 		"allow_pr":      project.AllowPR,
-		"status":        status,
-		"diff_stat":     diffStat,
+		"status":        trimPreview(status, 4000),
+		"diff_stat":     trimPreview(diffStat, 4000),
 		"confirm_token": token,
 		"expires_at":    rec.ExpiresAt,
 		"next":          []string{"publish.branch", "publish.pr_create"},
