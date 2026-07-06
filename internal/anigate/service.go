@@ -36,7 +36,7 @@ func NewServiceWithProductLine(cfg Config, log *slog.Logger, productLine Product
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	events, err := NewEventLog(cfg.StateDir)
+	events, err := NewEventLog(cfg.StateDir, log)
 	if err != nil {
 		return nil, err
 	}
