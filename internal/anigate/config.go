@@ -53,16 +53,17 @@ type Preset struct {
 }
 
 type PresetArg struct {
-	Name     string   `json:"name"`
-	Type     string   `json:"type"`
-	Required bool     `json:"required"`
-	Default  any      `json:"default"`
-	Enum     []string `json:"enum"`
-	Pattern  string   `json:"pattern"`
-	Min      *int64   `json:"min"`
-	Max      *int64   `json:"max"`
-	MaxLen   int      `json:"max_len"`
-	MaxItems int      `json:"max_items"`
+	Name             string   `json:"name"`
+	Type             string   `json:"type"`
+	Required         bool     `json:"required"`
+	Default          any      `json:"default"`
+	Enum             []string `json:"enum"`
+	Pattern          string   `json:"pattern"`
+	Min              *int64   `json:"min"`
+	Max              *int64   `json:"max"`
+	MaxLen           int      `json:"max_len"`
+	MaxItems         int      `json:"max_items"`
+	AllowLeadingDash bool     `json:"allow_leading_dash"`
 }
 
 type Agent struct {

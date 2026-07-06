@@ -157,3 +157,18 @@ func TestTaskTimelineSurvivesUnrelatedActivity(t *testing.T) {
 		t.Fatalf("expected both task events retrievable after unrelated flood, got %v", got["count"])
 	}
 }
+
+// Issue #12: free-form preset string args must not smuggle flags to the binary.
+func TestPresetRejectsLeadingDashFlagInjection(t *testing.T) {
+	p := Preset{Name: "x", Workspace: "w", Command: []string{"tool", "{arg}"}, Args: []PresetArg{{Name: "arg", Type: "string"}}}
+	if _, _, err := RenderPresetCommand(p, map[string]any{"arg": "-rf"}); err == nil {
+		t.Fatal("expected leading-dash value to be rejected")
+	}
+	if _, _, err := RenderPresetCommand(p, map[string]any{"arg": "safe"}); err != nil {
+		t.Fatalf("safe value should be accepted: %v", err)
+	}
+	p.Args[0].AllowLeadingDash = true
+	if _, _, err := RenderPresetCommand(p, map[string]any{"arg": "-v"}); err != nil {
+		t.Fatalf("allow_leading_dash should permit flags: %v", err)
+	}
+}

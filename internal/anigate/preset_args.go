@@ -152,6 +152,12 @@ func validatePresetString(arg PresetArg, s string) error {
 		}
 		return fmt.Errorf("arg %q is not in enum", arg.Name)
 	}
+	// Reject option-injection by default: a value beginning with '-' would be
+	// interpreted as a flag by the invoked binary. Presets that genuinely pass
+	// flags must opt in with allow_leading_dash.
+	if !arg.AllowLeadingDash && strings.HasPrefix(s, "-") {
+		return fmt.Errorf("arg %q must not begin with '-' (set allow_leading_dash to pass flags)", arg.Name)
+	}
 	if arg.Pattern != "" {
 		re, err := regexp.Compile(arg.Pattern)
 		if err != nil {
