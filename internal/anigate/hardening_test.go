@@ -271,3 +271,27 @@ func TestJobCountNotClampedForInternalStats(t *testing.T) {
 		t.Fatalf("expected >= 60 jobs counted, got %d (clamped?)", got)
 	}
 }
+
+// Issue #19: agent session updates must be serialized and finalized cleanly.
+func TestAgentSessionUpdatesAreSerialized(t *testing.T) {
+	svc, _ := testService(t)
+	start, err := svc.agentSessionStart(map[string]any{"agent": "echo_agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := start["session"].(AgentSession).ID
+	res, err := svc.agentMessageSend(map[string]any{"session_id": sid, "message": "hello", "async": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess := res["session"].(AgentSession); sess.LastJobID == "" {
+		t.Fatal("expected LastJobID to be recorded in the returned session")
+	}
+	got, err := svc.readAgentSession(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastJobID == "" || got.State == "running" {
+		t.Fatalf("session not finalized after sync send: %#v", got)
+	}
+}

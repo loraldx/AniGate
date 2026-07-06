@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +22,7 @@ type Service struct {
 	jobs        *JobManager
 	events      *EventLog
 	log         *slog.Logger
+	sessionMu   sync.Mutex
 }
 
 func NewService(cfg Config, log *slog.Logger) (*Service, error) {
