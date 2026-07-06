@@ -89,3 +89,26 @@ func TestReconcileInterruptedJobsOnStartup(t *testing.T) {
 		t.Fatalf("expected interrupted->failed, got state=%s err=%q", got.State, got.Error)
 	}
 }
+
+// Issue #8: an oversized agent message must not brick the session's read path.
+func TestAgentMessageOversizedDoesNotBrickSession(t *testing.T) {
+	svc, _ := testService(t)
+	sid := "20200101T000000-aaaaaaaaaaaa"
+	huge := strings.Repeat("x", 2*1024*1024)
+	if err := svc.appendAgentMessage(sid, AgentMessage{Role: "assistant", Text: huge}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.appendAgentMessage(sid, AgentMessage{Role: "user", Text: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := svc.readAgentMessages(sid, 10)
+	if err != nil {
+		t.Fatalf("session read bricked by oversized message: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].Text) > maxAgentMessageBytes+64 {
+		t.Fatalf("oversized message was not capped: %d bytes", len(msgs[0].Text))
+	}
+}

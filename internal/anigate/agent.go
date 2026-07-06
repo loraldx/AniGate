@@ -33,6 +33,10 @@ type AgentMessage struct {
 	JobID string    `json:"job_id,omitempty"`
 }
 
+// maxAgentMessageBytes caps a single stored message so one oversized turn can
+// never produce an NDJSON line the reader cannot scan back.
+const maxAgentMessageBytes = 256 * 1024
+
 func (s *Service) agentSessionStart(args map[string]any) (map[string]any, error) {
 	name := stringArg(args, "agent")
 	if name == "" {
@@ -282,6 +286,9 @@ func (s *Service) appendAgentMessage(sessionID string, msg AgentMessage) error {
 	if msg.Time.IsZero() {
 		msg.Time = time.Now().UTC()
 	}
+	if len(msg.Text) > maxAgentMessageBytes {
+		msg.Text = msg.Text[:maxAgentMessageBytes] + "\n[anigate: message truncated]"
+	}
 	dir := filepath.Join(s.cfg.StateDir, "agents", "messages")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -316,7 +323,7 @@ func (s *Service) readAgentMessages(sessionID string, limit int) ([]AgentMessage
 	defer f.Close()
 	var messages []AgentMessage
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner.Buffer(make([]byte, 4096), maxEventLineBytes)
 	for scanner.Scan() {
 		var msg AgentMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
