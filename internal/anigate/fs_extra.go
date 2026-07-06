@@ -41,6 +41,16 @@ func readBoundedText(path string, limit int64) (b []byte, truncated bool, size i
 	return buf[:n], truncated, size, nil
 }
 
+// writeFileAtomic writes data to a temp file and renames it into place so a
+// concurrent reader never observes a partially written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // sha256File streams a file's SHA-256 without loading it fully into memory.
 func sha256File(path string) (string, error) {
 	f, err := os.Open(path)

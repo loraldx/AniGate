@@ -228,7 +228,7 @@ func (s *Service) saveArtifactText(kind, name, text string, meta map[string]any)
 		text = text[:limit]
 	}
 	path := filepath.Join(dir, id+".txt")
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+	if err := writeFileAtomic(path, []byte(text), 0o600); err != nil {
 		return ArtifactRecord{}, err
 	}
 	rec := ArtifactRecord{
@@ -245,7 +245,7 @@ func (s *Service) saveArtifactText(kind, name, text string, meta map[string]any)
 	if err != nil {
 		return ArtifactRecord{}, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, id+".json"), b, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, id+".json"), b, 0o600); err != nil {
 		return ArtifactRecord{}, err
 	}
 	s.events.Append(Event{Kind: "artifact_created", OK: true, Fields: map[string]any{"artifact_id": id, "kind": kind, "name": name}})
