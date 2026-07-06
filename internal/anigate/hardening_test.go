@@ -1,6 +1,7 @@
 package anigate
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,5 +171,30 @@ func TestPresetRejectsLeadingDashFlagInjection(t *testing.T) {
 	p.Args[0].AllowLeadingDash = true
 	if _, _, err := RenderPresetCommand(p, map[string]any{"arg": "-v"}); err != nil {
 		t.Fatalf("allow_leading_dash should permit flags: %v", err)
+	}
+}
+
+// Issue #13: a failed tool call must record the offending workspace and path.
+func TestFailedToolCallAuditIncludesContext(t *testing.T) {
+	svc, _ := testService(t)
+	raw, _ := json.Marshal(map[string]any{"workspace": "test", "path": "../../etc/shadow"})
+	if _, err := svc.CallTool("fs.read", raw); err == nil {
+		t.Fatal("expected a path-escape error")
+	}
+	events, err := svc.events.Tail(20, EventFilter{Kind: "tool_call"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *Event
+	for i := range events {
+		if events[i].Tool == "fs.read" && !events[i].OK {
+			found = &events[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no failed fs.read audit event recorded")
+	}
+	if found.Path != "../../etc/shadow" || found.Workspace != "test" {
+		t.Fatalf("audit event missing context: workspace=%q path=%q", found.Workspace, found.Path)
 	}
 }

@@ -311,15 +311,17 @@ func objectSchema(props map[string]any) map[string]any {
 }
 
 func (s *Service) CallTool(name string, raw json.RawMessage) (any, error) {
-	if err := s.requireToolForProduct(name); err != nil {
-		s.events.Append(Event{Kind: "tool_call", Tool: name, OK: false, Message: errorString(err)})
-		return nil, err
-	}
 	var args map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
+	}
+	if err := s.requireToolForProduct(name); err != nil {
+		ev := Event{Kind: "tool_call", Tool: name, OK: false, Message: errorString(err)}
+		enrichToolCallEvent(&ev, args)
+		s.events.Append(ev)
+		return nil, err
 	}
 	var result any
 	var err error
@@ -439,8 +441,36 @@ func (s *Service) CallTool(name string, raw json.RawMessage) (any, error) {
 	default:
 		err = fmt.Errorf("unknown tool %q", name)
 	}
-	s.events.Append(Event{Kind: "tool_call", Tool: name, OK: err == nil, Message: errorString(err)})
+	ev := Event{Kind: "tool_call", Tool: name, OK: err == nil, Message: errorString(err)}
+	if err != nil {
+		enrichToolCallEvent(&ev, args)
+	}
+	s.events.Append(ev)
 	return result, err
+}
+
+// enrichToolCallEvent attaches the caller-supplied workspace, path, and common
+// identifiers to a failed tool-call audit event so gate rejections and
+// path-escape probes are attributable during forensic review.
+func enrichToolCallEvent(ev *Event, args map[string]any) {
+	if args == nil {
+		return
+	}
+	if ws := stringArg(args, "workspace"); ws != "" {
+		ev.Workspace = ws
+	}
+	if p := stringArg(args, "path"); p != "" {
+		ev.Path = p
+	}
+	fields := map[string]any{}
+	for _, key := range []string{"project", "task_id", "session_id", "name"} {
+		if v := stringArg(args, key); v != "" {
+			fields[key] = v
+		}
+	}
+	if len(fields) > 0 {
+		ev.Fields = fields
+	}
 }
 
 func (s *Service) sysInfo() (map[string]any, error) {
