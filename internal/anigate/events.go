@@ -36,8 +36,25 @@ type EventLog struct {
 }
 
 type EventFilter struct {
-	Kind string
-	Tool string
+	Kind   string
+	Tool   string
+	TaskID string
+}
+
+func (f EventFilter) match(ev Event) bool {
+	if f.Kind != "" && ev.Kind != f.Kind {
+		return false
+	}
+	if f.Tool != "" && ev.Tool != f.Tool {
+		return false
+	}
+	if f.TaskID != "" {
+		id, _ := ev.Fields["task_id"].(string)
+		if id != f.TaskID {
+			return false
+		}
+	}
+	return true
 }
 
 func NewEventLog(stateDir string, log *slog.Logger) (*EventLog, error) {
@@ -108,10 +125,7 @@ func (l *EventLog) Tail(limit int, filter EventFilter) ([]Event, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
 			continue
 		}
-		if filter.Kind != "" && ev.Kind != filter.Kind {
-			continue
-		}
-		if filter.Tool != "" && ev.Tool != filter.Tool {
+		if !filter.match(ev) {
 			continue
 		}
 		events = append(events, ev)
@@ -124,4 +138,34 @@ func (l *EventLog) Tail(limit int, filter EventFilter) ([]Event, error) {
 		return nil, err
 	}
 	return events, nil
+}
+
+// scanEvents streams every matching event through fn in file order. Callers
+// that only need aggregates (audit.summary) keep bounded memory by not
+// retaining events, so a time-window summary is not silently capped to the
+// last N records the way Tail is.
+func (l *EventLog) scanEvents(filter EventFilter, fn func(Event)) error {
+	if l == nil {
+		return errors.New("event log is not configured")
+	}
+	f, err := os.Open(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4096), maxEventLineBytes)
+	for scanner.Scan() {
+		var ev Event
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		if filter.match(ev) {
+			fn(ev)
+		}
+	}
+	return scanner.Err()
 }

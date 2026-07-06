@@ -9,19 +9,17 @@ func (s *Service) auditSummary(args map[string]any) (map[string]any, error) {
 	if sinceSec <= 0 || sinceSec > 31*24*3600 {
 		sinceSec = 24 * 3600
 	}
-	events, err := s.events.Tail(1000, EventFilter{})
-	if err != nil {
-		return nil, err
-	}
 	cutoff := time.Now().UTC().Add(-time.Duration(sinceSec) * time.Second)
 	byKind := map[string]int{}
 	byTool := map[string]int{}
 	failures := 0
+	scanned := 0
 	var recentFailures []Event
-	for _, ev := range events {
+	err := s.events.scanEvents(EventFilter{}, func(ev Event) {
 		if ev.Time.Before(cutoff) {
-			continue
+			return
 		}
+		scanned++
 		byKind[ev.Kind]++
 		if ev.Tool != "" {
 			byTool[ev.Tool]++
@@ -32,10 +30,13 @@ func (s *Service) auditSummary(args map[string]any) (map[string]any, error) {
 				recentFailures = append(recentFailures, ev)
 			}
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"since":           cutoff.Format(time.RFC3339),
-		"events_scanned":  len(events),
+		"events_scanned":  scanned,
 		"by_kind":         byKind,
 		"by_tool":         byTool,
 		"failures":        failures,

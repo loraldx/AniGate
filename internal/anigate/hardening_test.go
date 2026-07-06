@@ -112,3 +112,24 @@ func TestAgentMessageOversizedDoesNotBrickSession(t *testing.T) {
 		t.Fatalf("oversized message was not capped: %d bytes", len(msgs[0].Text))
 	}
 }
+
+// Issue #9: audit.summary must aggregate the whole time window, not the last ~50.
+func TestAuditSummaryCoversWholeWindow(t *testing.T) {
+	svc, _ := testService(t)
+	const n = 120 // well past the old 50-event Tail clamp
+	for i := 0; i < n; i++ {
+		if err := svc.events.Append(Event{Kind: "tool_call", Tool: "fs.read", OK: false}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary, err := svc.auditSummary(map[string]any{"since_sec": float64(3600)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := summary["events_scanned"].(int); got < n {
+		t.Fatalf("expected >= %d events scanned, got %d", n, got)
+	}
+	if got := summary["failures"].(int); got < n {
+		t.Fatalf("expected >= %d failures counted, got %d", n, got)
+	}
+}
