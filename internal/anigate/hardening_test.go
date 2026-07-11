@@ -1,6 +1,7 @@
 package anigate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -452,6 +453,29 @@ func TestWritePreviewCreateOnlyCoversMissingFiles(t *testing.T) {
 	}
 	if got["would_write"] != true {
 		t.Fatalf("unexpected preview result: %#v", got)
+	}
+}
+
+// Issue #35: an oversized stdio frame must fail alone, not kill the server.
+func TestServeStdioSurvivesOversizedFrame(t *testing.T) {
+	svc, _ := testService(t)
+	huge := strings.Repeat("x", maxStdioLineBytes+10)
+	valid := `{"jsonrpc":"2.0","id":7,"method":"ping"}`
+	in := strings.NewReader(huge + "\n" + valid + "\n")
+	var out bytes.Buffer
+	code := ServeStdio(in, &out, svc, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if code != 0 {
+		t.Fatalf("server exited with %d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 responses (error + pong), got %d", len(lines))
+	}
+	if !strings.Contains(lines[0], "-32700") {
+		t.Fatalf("first response should be a -32700 error: %s", lines[0])
+	}
+	if !strings.Contains(lines[1], `"id":7`) {
+		t.Fatalf("second response should answer the valid request: %s", lines[1])
 	}
 }
 
