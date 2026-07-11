@@ -356,13 +356,19 @@ func validName(s string) bool {
 	if s == "" {
 		return false
 	}
+	allDots := true
 	for _, r := range s {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			if r != '.' {
+				allDots = false
+			}
 			continue
 		}
 		return false
 	}
-	return true
+	// validName gates IDs before they are joined into state_dir paths; "." and
+	// ".." must never pass even if a future call site drops the file suffix.
+	return !allDots
 }
 
 func validEnvName(s string) bool {

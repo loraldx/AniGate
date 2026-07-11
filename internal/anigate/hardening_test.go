@@ -2,6 +2,7 @@ package anigate
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -344,6 +345,80 @@ func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "publish_tokens"))
 	if len(entries) != 0 {
 		t.Fatalf("a publish token was minted despite the failure: %d files", len(entries))
+	}
+}
+
+// Issue #37: file.search must keep matching after lines longer than bufio's
+// 64 KiB scanner token limit.
+func TestFileSearchSurvivesLongLines(t *testing.T) {
+	svc, root := testService(t)
+	svc.cfg.MaxSearchFileBytes = 512 * 1024
+	content := strings.Repeat("x", 128*1024) + "\nneedle-after-long-line\n"
+	if err := os.WriteFile(filepath.Join(root, "long.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.fileSearch(map[string]any{"workspace": "test", "query": "needle-after-long-line"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := got["results"].([]map[string]any)
+	if len(results) != 1 || results[0]["line"] != 2 {
+		t.Fatalf("match after a long line was lost: %#v", results)
+	}
+}
+
+// Issue #38: validName must reject dot-only names outright.
+func TestValidNameRejectsDotOnlyNames(t *testing.T) {
+	for _, bad := range []string{".", "..", "..."} {
+		if validName(bad) {
+			t.Fatalf("validName(%q) must be false", bad)
+		}
+	}
+	for _, good := range []string{"a.b", "20200101T000000-abcdef012345", "v1.2.3"} {
+		if !validName(good) {
+			t.Fatalf("validName(%q) must be true", good)
+		}
+	}
+}
+
+// Issue #39: audit.summary recent_failures must hold the newest failures.
+func TestAuditSummaryRecentFailuresAreNewest(t *testing.T) {
+	svc, _ := testService(t)
+	for i := 0; i < 15; i++ {
+		if err := svc.events.Append(Event{Kind: "tool_call", Tool: "fs.read", OK: false, Message: fmt.Sprintf("fail-%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary, err := svc.auditSummary(map[string]any{"since_sec": float64(3600)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent := summary["recent_failures"].([]Event)
+	if len(recent) != 10 {
+		t.Fatalf("expected 10 recent failures, got %d", len(recent))
+	}
+	if recent[len(recent)-1].Message != "fail-14" {
+		t.Fatalf("newest failure missing from recent_failures, tail is %q", recent[len(recent)-1].Message)
+	}
+}
+
+// Issue #40: fs.write_preview's create flag must only tolerate missing files,
+// not arbitrary read errors.
+func TestWritePreviewCreateOnlyCoversMissingFiles(t *testing.T) {
+	svc, root := testService(t)
+	if err := os.Mkdir(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Reading a directory fails with a non-NotExist error; create must not hide it.
+	if _, err := svc.fsWritePreview(map[string]any{"workspace": "test", "path": "adir", "content": "x", "create": true}); err == nil {
+		t.Fatal("expected a read error for a directory target")
+	}
+	got, err := svc.fsWritePreview(map[string]any{"workspace": "test", "path": "new.txt", "content": "x", "create": true})
+	if err != nil {
+		t.Fatalf("missing file with create should still preview: %v", err)
+	}
+	if got["would_write"] != true {
+		t.Fatalf("unexpected preview result: %#v", got)
 	}
 }
 

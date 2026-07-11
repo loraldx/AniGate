@@ -1,7 +1,6 @@
 package anigate
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -665,11 +664,13 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 			return nil
 		}
 		scanned++
-		lines := bufio.NewScanner(strings.NewReader(string(b)))
+		// The file is already fully in memory (bounded by MaxSearchFileBytes);
+		// split directly so lines beyond bufio.Scanner's 64 KiB token limit
+		// cannot silently stop the scan mid-file.
 		lineNo := 0
-		for lines.Scan() {
+		for _, line := range strings.Split(string(b), "\n") {
 			lineNo++
-			line := lines.Text()
+			line = strings.TrimSuffix(line, "\r")
 			hay := line
 			if !caseSensitive {
 				hay = strings.ToLower(line)

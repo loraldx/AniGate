@@ -26,8 +26,11 @@ func (s *Service) auditSummary(args map[string]any) (map[string]any, error) {
 		}
 		if !ev.OK {
 			failures++
-			if len(recentFailures) < 10 {
-				recentFailures = append(recentFailures, ev)
+			// Keep a sliding tail so the field really holds the newest failures.
+			recentFailures = append(recentFailures, ev)
+			if len(recentFailures) > 10 {
+				copy(recentFailures, recentFailures[1:])
+				recentFailures = recentFailures[:10]
 			}
 		}
 	})

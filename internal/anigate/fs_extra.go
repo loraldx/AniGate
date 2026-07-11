@@ -179,7 +179,9 @@ func (s *Service) fsWritePreview(args map[string]any) (map[string]any, error) {
 		old = string(b)
 		oldTruncated = truncated
 		oldSize = size
-	} else if !boolArg(args, "create") {
+	} else if !os.IsNotExist(err) || !boolArg(args, "create") {
+		// create only covers a genuinely missing file; permission or I/O
+		// errors must surface instead of producing a misleading new-file diff.
 		return nil, err
 	}
 	rawDiff := simpleUnifiedDiff(filepath.ToSlash(rp.Rel), old, content)
