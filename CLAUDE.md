@@ -71,7 +71,7 @@ Heads-up: `context.go` contains only `contextWithBackground()`; the actual `cont
 
 ### Subprocess execution
 
-No shell, ever: presets, agents, and git all run as argv arrays via `exec.CommandContext` (git/gh with a 15s timeout). The environment is built **from scratch**: PATH only (plus `HOME=<state_dir>/home` when `isolated_home`, plus literal env pairs from config validated against `env_allowlist` at config-load time, not exec time). Host env is never inherited. Remote URLs are redacted in errors. Async jobs intentionally use `context.Background()` — do not "fix" this to the request context or async agent jobs die when the RPC returns. Job cancellation relies on an in-memory map, so a restarted process cannot cancel jobs it did not start; on startup `reconcileInterruptedJobs` converts stale `running` records to `failed` (audit event carries `reconciled: true`).
+No shell, ever: presets, agents, and git all run as argv arrays via `exec.CommandContext` (git/gh local ops get a 15s timeout; clone/fetch/push/gh network ops get 120s — see `hostcmd.go`). The environment is built **from scratch**: PATH only (plus `HOME=<state_dir>/home` when `isolated_home`, plus literal env pairs from config validated against `env_allowlist` at config-load time, not exec time). Host env is never inherited. Remote URLs are redacted in errors. Async jobs intentionally use `context.Background()` — do not "fix" this to the request context or async agent jobs die when the RPC returns. Job cancellation relies on an in-memory map, so a restarted process cannot cancel jobs it did not start; on startup `reconcileInterruptedJobs` converts stale `running` records to `failed` (audit event carries `reconciled: true`).
 
 ### Project/task/publish flow
 

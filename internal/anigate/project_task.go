@@ -489,7 +489,7 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 	if pending {
 		return nil, fmt.Errorf("task has uncommitted changes; call task.commit_preview then task.commit before publish.preview")
 	}
-	head, err := s.runGitOutput(task.Worktree, "rev-parse", "HEAD")
+	head, err := gitHeadSHA(task.Worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,7 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 	s.sweepExpiredPublishTokens()
 	// The token is bound to the exact HEAD being previewed; commits landing
 	// after the preview invalidate it, mirroring the task.commit fingerprint gate.
-	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, HeadSHA: strings.TrimSpace(head), CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
+	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, HeadSHA: head, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
 	if err := s.writePublishToken(rec); err != nil {
 		return nil, err
 	}
@@ -533,7 +533,9 @@ func (s *Service) publishBranch(args map[string]any) (map[string]any, error) {
 	if err := s.deletePublishToken(rec.Token); err != nil {
 		return nil, err
 	}
-	if err := runGitNetwork(task.Worktree, "push", "-u", "origin", task.Branch); err != nil {
+	// Push the exact SHA the token verified, not the branch name: a commit
+	// racing in after verification must not ride along on the push.
+	if err := runGitNetwork(task.Worktree, "push", "origin", rec.HeadSHA+":refs/heads/"+task.Branch); err != nil {
 		return nil, err
 	}
 	s.events.Append(Event{Kind: "publish_branch", Tool: "publish.branch", OK: true, Fields: map[string]any{"task_id": task.ID, "project": task.Project, "branch": task.Branch}})
@@ -805,11 +807,11 @@ func (s *Service) verifyPublishToken(args map[string]any) (TaskRecord, Project, 
 	if rec.TaskID != task.ID || rec.Branch != task.Branch || time.Now().UTC().After(rec.ExpiresAt) {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token is expired or does not match task")
 	}
-	head, err := s.runGitOutput(task.Worktree, "rev-parse", "HEAD")
+	head, err := gitHeadSHA(task.Worktree)
 	if err != nil {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, err
 	}
-	if rec.HeadSHA == "" || strings.TrimSpace(head) != rec.HeadSHA {
+	if rec.HeadSHA == "" || head != rec.HeadSHA {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token no longer matches the worktree HEAD; run publish.preview again")
 	}
 	project, err := s.requireProject(task.Project)
@@ -830,6 +832,16 @@ func newPublishToken() (string, error) {
 func runGitExternal(cwd string, args ...string) error {
 	_, err := runExternalOutput(cwd, "git", args...)
 	return err
+}
+
+// gitHeadSHA resolves the worktree HEAD from stdout only, so stderr warnings
+// can never pollute a SHA that is stored or compared.
+func gitHeadSHA(worktree string) (string, error) {
+	out, err := runHostCommand(worktree, hostCmdOpts{StdoutOnly: true}, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // gitIdentityEnv supplies a default author/committer identity for git
