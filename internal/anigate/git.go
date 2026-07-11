@@ -1,9 +1,7 @@
 package anigate
 
 import (
-	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -210,40 +208,16 @@ func (s *Service) runGit(cwd string, maxBytes int64, args ...string) (string, bo
 }
 
 func (s *Service) runGitOutput(cwd string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = cwd
-	cmd.Env = []string{"PATH=" + pathEnv()}
-	b, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("git command timed out")
-	}
-	if err != nil {
-		return "", fmt.Errorf("git %s failed: %s", strings.Join(args, " "), trimPreview(string(b), 500))
-	}
-	return string(b), nil
+	return runHostCommand(cwd, hostCmdOpts{}, "git", args...)
 }
 
 func runGitApply(cwd, patch string, check bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
 	args := []string{"apply", "--whitespace=nowarn"}
 	if check {
 		args = append(args, "--check")
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = cwd
-	cmd.Env = []string{"PATH=" + pathEnv()}
-	cmd.Stdin = strings.NewReader(patch)
-	b, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("git apply timed out")
-	}
-	if err != nil {
-		return fmt.Errorf("git apply failed: %s", trimPreview(string(b), 500))
-	}
-	return nil
+	_, err := runHostCommand(cwd, hostCmdOpts{Stdin: patch}, "git", args...)
+	return err
 }
 
 func pathEnv() string {

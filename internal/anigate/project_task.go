@@ -1,14 +1,12 @@
 package anigate
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -79,7 +77,7 @@ func (s *Service) projectEnsure(args map[string]any) (map[string]any, error) {
 		if err := runGitExternal(rp.Abs, "remote", "set-url", "origin", project.RemoteURL); err != nil {
 			return nil, err
 		}
-		if err := runGitExternal(rp.Abs, "fetch", "--all", "--prune"); err != nil {
+		if err := runGitNetwork(rp.Abs, "fetch", "--all", "--prune"); err != nil {
 			return nil, err
 		}
 	} else {
@@ -89,7 +87,7 @@ func (s *Service) projectEnsure(args map[string]any) (map[string]any, error) {
 		if _, err := os.Stat(rp.Abs); err == nil {
 			return nil, fmt.Errorf("project path exists but is not a git repository")
 		}
-		if err := runGitExternal(filepath.Dir(rp.Abs), "clone", project.RemoteURL, rp.Abs); err != nil {
+		if err := runGitNetwork(filepath.Dir(rp.Abs), "clone", project.RemoteURL, rp.Abs); err != nil {
 			return nil, err
 		}
 		created = true
@@ -518,7 +516,7 @@ func (s *Service) publishBranch(args map[string]any) (map[string]any, error) {
 	if err := s.deletePublishToken(rec.Token); err != nil {
 		return nil, err
 	}
-	if err := runGitExternal(task.Worktree, "push", "-u", "origin", task.Branch); err != nil {
+	if err := runGitNetwork(task.Worktree, "push", "-u", "origin", task.Branch); err != nil {
 		return nil, err
 	}
 	s.events.Append(Event{Kind: "publish_branch", Tool: "publish.branch", OK: true, Fields: map[string]any{"task_id": task.ID, "project": task.Project, "branch": task.Branch}})
@@ -548,7 +546,7 @@ func (s *Service) publishPRCreate(args map[string]any) (map[string]any, error) {
 	if err := s.deletePublishToken(rec.Token); err != nil {
 		return nil, err
 	}
-	out, err := runExternalOutput(task.Worktree, "gh", cmdArgs...)
+	out, err := runHostCommand(task.Worktree, hostCmdOpts{Timeout: gitNetworkTimeout}, "gh", cmdArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -718,19 +716,12 @@ func (s *Service) taskHasRunningJob(taskID string) (bool, error) {
 }
 
 func taskHasPendingChanges(worktree string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain=v1")
-	cmd.Dir = worktree
-	cmd.Env = []string{"PATH=" + pathEnv()}
-	b, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		return false, fmt.Errorf("git status timed out in task worktree")
-	}
+	// StdoutOnly: stderr warnings must not be mistaken for pending changes.
+	out, err := runHostCommand(worktree, hostCmdOpts{StdoutOnly: true}, "git", "status", "--porcelain=v1")
 	if err != nil {
-		return false, fmt.Errorf("git status failed in task worktree: %v", err)
+		return false, fmt.Errorf("git status failed in task worktree: %w", err)
 	}
-	return strings.TrimSpace(string(b)) != "", nil
+	return strings.TrimSpace(out) != "", nil
 }
 
 func (s *Service) writePublishToken(rec publishTokenRecord) error {
@@ -804,26 +795,21 @@ func gitIdentityEnv() []string {
 }
 
 func runExternalOutput(cwd, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = cwd
-	env := []string{"PATH=" + pathEnv()}
+	opts := hostCmdOpts{}
 	if name == "git" {
 		// The subprocess env is stripped (no HOME), so git cannot read the
 		// user's global identity. Provide a default bot identity so task.commit
 		// works out of the box instead of failing with "empty ident name".
-		env = append(env, gitIdentityEnv()...)
+		opts.ExtraEnv = gitIdentityEnv()
 	}
-	cmd.Env = env
-	b, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("%s command timed out", name)
-	}
-	if err != nil {
-		return "", fmt.Errorf("%s %s failed: %s", name, sanitizeCommandText(strings.Join(args, " ")), sanitizeCommandText(trimPreview(string(b), 500)))
-	}
-	return string(b), nil
+	return runHostCommand(cwd, opts, name, args...)
+}
+
+// runGitNetwork is runGitExternal with the longer network timeout for git
+// operations that contact the remote (clone, fetch, push).
+func runGitNetwork(cwd string, args ...string) error {
+	_, err := runHostCommand(cwd, hostCmdOpts{Timeout: gitNetworkTimeout, ExtraEnv: gitIdentityEnv()}, "git", args...)
+	return err
 }
 
 func redactRemoteURL(remote string) string {

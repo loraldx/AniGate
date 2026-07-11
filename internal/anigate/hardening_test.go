@@ -304,6 +304,19 @@ func TestProjectEnsureRedactsRemoteURLInErrors(t *testing.T) {
 	}
 }
 
+// Issue #31: the unified host-command runner must sanitize credentialed URLs
+// in both argv and output previews of error messages.
+func TestRunHostCommandSanitizesErrors(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runHostCommand(dir, hostCmdOpts{}, "git", "remote", "set-url", "origin", "https://u:p4ss@example.com/x.git")
+	if err == nil {
+		t.Fatal("expected failure outside a git repo")
+	}
+	if strings.Contains(err.Error(), "p4ss") {
+		t.Fatalf("runner leaked credential: %v", err)
+	}
+}
+
 // Issue #30: publish.preview must refuse, not fall open, when the worktree's
 // cleanliness cannot be verified.
 func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
