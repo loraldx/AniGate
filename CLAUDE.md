@@ -26,7 +26,7 @@ make run-http-mini   # ./bin/anigate-mini http --addr 127.0.0.1:8787 --config co
 make run-stdio-max   # stdio mode with example config
 ```
 
-Tests shell out to real `git` (and spawn real subprocesses), so `git` must be on PATH. CI (`.github/workflows/ci.yml`, Go 1.22.x) re-runs the verify steps inline (minus the HTTP smoke test). Releases: push a `v*` tag; no version injection at build time.
+Tests shell out to real `git` (and spawn real subprocesses), so `git` must be on PATH. CI (`.github/workflows/ci.yml`, Go 1.22.x) runs `scripts/verify.sh` directly — verify.sh is the single source of truth for the quality gate. Releases: push a `v*` tag; no version injection at build time, but the release workflow fails if the tag doesn't match the `VERSION` file.
 
 **Version bumps require editing both** the `VERSION` file and the `Version` const in `internal/anigate/version.go` — `TestVersionFileMatchesConstant` fails otherwise.
 
@@ -46,9 +46,9 @@ Adding/removing a tool touches:
 1. `allTools()` in `service.go` (schema)
 2. the `CallTool` switch in `service.go` (dispatch)
 3. `miniToolNames` in `product.go` **if** it belongs in Mini (no map entry = silently Max-only)
-4. Three independent hard-coded tool-count/name assertions: `scripts/verify.sh` (21 Mini / 56 Max / 56 legacy), `.github/workflows/ci.yml` (duplicated inline, not derived from verify.sh), and `service_test.go` (`TestMiniProductToolsArePreviewCore` has the exact ordered Mini list; `TestMaxProductToolsRemainComplete` asserts the Max count)
+4. Two hard-coded tool-count/name assertion sites: `scripts/verify.sh` (21 Mini / 56 Max / 56 legacy; CI runs this script) and `service_test.go` (`TestMiniProductToolsArePreviewCore` has the exact ordered Mini list; `TestMaxProductToolsRemainComplete` asserts the Max count)
 
-Mini must never expose execution/mutation families: `agent.*`, `publish.*`, `file.edit_apply`, `patch.apply`, `app.run_preset`, `job.*`, `project.*`, `task.*`, `audit.*`, `workspace.snapshot`, `gate.*` (grepped in verify.sh and CI).
+Mini must never expose execution/mutation families: `agent.*`, `publish.*`, `file.edit_apply`, `patch.apply`, `app.run_preset`, `job.*`, `project.*`, `task.*`, `audit.*`, `workspace.snapshot`, `gate.*` (grepped in verify.sh).
 
 ### Authorization layers (in order)
 
