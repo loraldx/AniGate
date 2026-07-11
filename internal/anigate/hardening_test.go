@@ -479,6 +479,35 @@ func TestServeStdioSurvivesOversizedFrame(t *testing.T) {
 	}
 }
 
+// Issue #48: JSON-RPC conformance — id:0 must be echoed, empty list results
+// must carry their field, and initialize echoes a supported client version.
+func TestProtocolConformance(t *testing.T) {
+	svc, _ := testService(t)
+	resp, ok := dispatchJSON([]byte(`{"jsonrpc":"2.0","id":0,"method":"ping"}`), svc)
+	if !ok {
+		t.Fatal("ping with id:0 must produce a response")
+	}
+	b, _ := json.Marshal(resp)
+	if !strings.Contains(string(b), `"id":0`) {
+		t.Fatalf("id:0 was not echoed: %s", b)
+	}
+	resp, _ = dispatchJSON([]byte(`{"jsonrpc":"2.0","id":1,"method":"resources/list"}`), svc)
+	b, _ = json.Marshal(resp)
+	if !strings.Contains(string(b), `"resources":[]`) {
+		t.Fatalf("resources/list missing empty resources field: %s", b)
+	}
+	resp, _ = dispatchJSON([]byte(`{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`), svc)
+	b, _ = json.Marshal(resp)
+	if !strings.Contains(string(b), `"protocolVersion":"2024-11-05"`) {
+		t.Fatalf("supported client protocolVersion was not echoed: %s", b)
+	}
+	resp, _ = dispatchJSON([]byte(`{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}`), svc)
+	b, _ = json.Marshal(resp)
+	if !strings.Contains(string(b), `"protocolVersion":"2025-06-18"`) {
+		t.Fatalf("unsupported version should fall back to latest: %s", b)
+	}
+}
+
 // publishFixture builds a service around a real single-commit git repo with a
 // task record pointing at it, for exercising the publish token flow locally.
 func publishFixture(t *testing.T) (*Service, TaskRecord, string) {

@@ -18,7 +18,7 @@ type rpcRequest struct {
 
 type rpcResponse struct {
 	JSONRPC string    `json:"jsonrpc"`
-	ID      any       `json:"id,omitempty"`
+	ID      any       `json:"id"` // always echoed; null when the request id is unknown (spec-required for parse errors)
 	Result  any       `json:"result,omitempty"`
 	Error   *rpcError `json:"error,omitempty"`
 }
@@ -121,7 +121,7 @@ func dispatch(req rpcRequest, svc *Service) rpcResponse {
 	switch req.Method {
 	case "initialize":
 		resp.Result = map[string]any{
-			"protocolVersion": "2025-06-18",
+			"protocolVersion": negotiateProtocolVersion(req.Params),
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
@@ -143,12 +143,28 @@ func dispatch(req rpcRequest, svc *Service) rpcResponse {
 		result, err := svc.CallTool(params.Name, params.Arguments)
 		tr := encodeToolResult(result, err)
 		resp.Result = tr
-	case "resources/list", "prompts/list":
-		resp.Result = map[string]any{}
+	case "resources/list":
+		resp.Result = map[string]any{"resources": []any{}}
+	case "prompts/list":
+		resp.Result = map[string]any{"prompts": []any{}}
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 	}
 	return resp
+}
+
+// negotiateProtocolVersion echoes the client's requested MCP protocol version
+// when the server supports it, otherwise answers with the latest supported one.
+func negotiateProtocolVersion(params json.RawMessage) string {
+	const latest = "2025-06-18"
+	supported := map[string]bool{"2024-11-05": true, "2025-03-26": true, latest: true}
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if len(params) > 0 && json.Unmarshal(params, &p) == nil && supported[p.ProtocolVersion] {
+		return p.ProtocolVersion
+	}
+	return latest
 }
 
 func encodeToolResult(result any, err error) toolResult {
