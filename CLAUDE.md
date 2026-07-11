@@ -55,7 +55,7 @@ Mini must never expose execution/mutation families: `agent.*`, `publish.*`, `fil
 1. **HTTP token auth** (HTTP mode only).
 2. **Product gate**: `Service.Tools()` filters tools/list for Mini; `requireToolForProduct` runs first in `CallTool`. It deliberately returns nil for *unknown* tool names so the switch produces "unknown tool" instead of a misleading product-line error — keep that ordering.
 3. **Workspace profile ladder** (`workspaceAllows` in `policy.go`): profiles are `reader`/`operator`/`agent`; `write` needs `!ReadOnly` AND operator/agent; `agent.*` needs the agent profile. `read_only:true` blocks only the `write` need — presets can still execute. Default profile when omitted in config is `reader`. **Handlers do their own permission checks — there is no central write gate.** A new mutating tool must call `s.workspaceAllows(workspace, "write")` itself or it silently bypasses policy. Note: the preset "operate" check is duplicated inline in `JobManager.RunPreset` (`jobs.go`) — keep it in sync with `workspaceAllows`.
-4. **Path confinement**: `pathPolicy.resolve` (`pathpolicy.go`) symlink-resolves and rejects anything escaping the workspace root. Symlinks are only resolved for paths that already exist.
+4. **Path confinement**: `pathPolicy.resolve` (`pathpolicy.go`) symlink-resolves and rejects anything escaping the workspace root. Existing paths are resolved directly; non-existent targets are confined via their deepest existing ancestor (`resolveDeepestExisting`), so a new file under an escaping symlink is still rejected.
 
 ### Error conventions
 
@@ -71,7 +71,7 @@ Heads-up: `context.go` contains only `contextWithBackground()`; the actual `cont
 
 ### Subprocess execution
 
-No shell, ever: presets, agents, and git all run as argv arrays via `exec.CommandContext` (git/gh with a 15s timeout). The environment is built **from scratch**: PATH only (plus `HOME=<state_dir>/home` when `isolated_home`, plus literal env pairs from config validated against `env_allowlist` at config-load time, not exec time). Host env is never inherited. Remote URLs are redacted in errors. Async jobs intentionally use `context.Background()` — do not "fix" this to the request context or async agent jobs die when the RPC returns. Job cancellation relies on an in-memory map, so after a restart, `running` job records are orphaned.
+No shell, ever: presets, agents, and git all run as argv arrays via `exec.CommandContext` (git/gh with a 15s timeout). The environment is built **from scratch**: PATH only (plus `HOME=<state_dir>/home` when `isolated_home`, plus literal env pairs from config validated against `env_allowlist` at config-load time, not exec time). Host env is never inherited. Remote URLs are redacted in errors. Async jobs intentionally use `context.Background()` — do not "fix" this to the request context or async agent jobs die when the RPC returns. Job cancellation relies on an in-memory map, so a restarted process cannot cancel jobs it did not start; on startup `reconcileInterruptedJobs` converts stale `running` records to `failed` (audit event carries `reconciled: true`).
 
 ### Project/task/publish flow
 
