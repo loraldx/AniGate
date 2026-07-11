@@ -2,6 +2,7 @@ package anigate
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -269,6 +270,67 @@ func TestJobCountNotClampedForInternalStats(t *testing.T) {
 	}
 	if got := stats["jobs"].(int); got < 60 {
 		t.Fatalf("expected >= 60 jobs counted, got %d (clamped?)", got)
+	}
+}
+
+// Issue #29: project.ensure maintenance commands must not leak credentialed
+// remote URLs into error messages.
+func TestProjectEnsureRedactsRemoteURLInErrors(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "clone")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, repo, "init")
+	secret := "sekrettoken123"
+	remote := "https://bot:" + secret + "@127.0.0.1:1/private.git"
+	cfg := Config{
+		StateDir:   filepath.Join(root, "state"),
+		Workspaces: []Workspace{{Name: "work", Path: root, Profile: "agent"}},
+		Projects:   []Project{{Name: "demo", Workspace: "work", Path: "clone", RemoteURL: remote, DefaultBranch: "main"}},
+	}
+	svc, err := NewService(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fresh repo has no "origin" remote, so `git remote set-url` fails with
+	// the credentialed URL in its argv; the error must arrive redacted.
+	_, err = svc.projectEnsure(map[string]any{"project": "demo"})
+	if err == nil {
+		t.Fatal("expected project.ensure to fail (no origin remote)")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaked the remote credential: %v", err)
+	}
+}
+
+// Issue #30: publish.preview must refuse, not fall open, when the worktree's
+// cleanliness cannot be verified.
+func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
+	root := t.TempDir()
+	notARepo := filepath.Join(root, "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		StateDir:   filepath.Join(root, "state"),
+		Workspaces: []Workspace{{Name: "work", Path: root, Profile: "agent"}},
+		Projects:   []Project{{Name: "demo", Workspace: "work", Path: "not-a-repo", RemoteURL: "https://example.invalid/x.git", DefaultBranch: "main"}},
+	}
+	svc, err := NewService(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := TaskRecord{ID: "20200101T000000-eeeeeeeeeeee", Project: "demo", State: "active", Workspace: "work", Worktree: notARepo, Branch: "anigate/x"}
+	if err := svc.writeTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.publishPreview(map[string]any{"task_id": task.ID}); err == nil {
+		t.Fatal("expected publish.preview to fail when git status cannot run")
+	}
+	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "publish_tokens"))
+	if len(entries) != 0 {
+		t.Fatalf("a publish token was minted despite the failure: %d files", len(entries))
 	}
 }
 

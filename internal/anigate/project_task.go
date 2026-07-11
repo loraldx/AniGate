@@ -74,10 +74,12 @@ func (s *Service) projectEnsure(args map[string]any) (map[string]any, error) {
 	}
 	created := false
 	if _, err := os.Stat(filepath.Join(rp.Abs, ".git")); err == nil {
-		if _, err := s.runGitOutput(rp.Abs, "remote", "set-url", "origin", project.RemoteURL); err != nil {
+		// These two commands carry the remote URL in args/stderr; they must go
+		// through the sanitized runner so embedded credentials never reach errors.
+		if err := runGitExternal(rp.Abs, "remote", "set-url", "origin", project.RemoteURL); err != nil {
 			return nil, err
 		}
-		if _, err := s.runGitOutput(rp.Abs, "fetch", "--all", "--prune"); err != nil {
+		if err := runGitExternal(rp.Abs, "fetch", "--all", "--prune"); err != nil {
 			return nil, err
 		}
 	} else {
@@ -331,7 +333,11 @@ func (s *Service) taskCommitPreview(args map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	if !taskHasPendingChanges(task.Worktree) {
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if !pending {
 		return nil, fmt.Errorf("task has no pending changes to commit")
 	}
 	message := strings.TrimSpace(stringArg(args, "message"))
@@ -380,7 +386,11 @@ func (s *Service) taskCommit(args map[string]any) (map[string]any, error) {
 	if expected == "" {
 		return nil, fmt.Errorf("expected_diff_sha256 is required")
 	}
-	if !taskHasPendingChanges(task.Worktree) {
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if !pending {
 		return nil, fmt.Errorf("task has no pending changes to commit")
 	}
 	fingerprint, err := s.taskChangeFingerprint(task)
@@ -462,7 +472,13 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 	}
 	status, _ := s.runGitOutput(task.Worktree, "status", "--porcelain=v1", "--branch")
 	diffStat, _ := s.runGitOutput(task.Worktree, "diff", "--stat")
-	if taskHasPendingChanges(task.Worktree) {
+	// A git failure must not fall open here: minting a publish token for a
+	// worktree whose cleanliness could not be verified defeats the dirty check.
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if pending {
 		return nil, fmt.Errorf("task has uncommitted changes; call task.commit_preview then task.commit before publish.preview")
 	}
 	token, err := newPublishToken()
@@ -701,14 +717,20 @@ func (s *Service) taskHasRunningJob(taskID string) (bool, error) {
 	return false, nil
 }
 
-func taskHasPendingChanges(worktree string) bool {
+func taskHasPendingChanges(worktree string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain=v1")
 	cmd.Dir = worktree
 	cmd.Env = []string{"PATH=" + pathEnv()}
 	b, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(b)) != ""
+	if ctx.Err() == context.DeadlineExceeded {
+		return false, fmt.Errorf("git status timed out in task worktree")
+	}
+	if err != nil {
+		return false, fmt.Errorf("git status failed in task worktree: %v", err)
+	}
+	return strings.TrimSpace(string(b)) != "", nil
 }
 
 func (s *Service) writePublishToken(rec publishTokenRecord) error {
