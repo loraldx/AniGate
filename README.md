@@ -153,6 +153,11 @@ The installer writes configs to:
 ~/.config/anigate/anigate.json
 ```
 
+By default the Mini config exposes a read-only view of your home directory,
+while the Max and legacy configs get a dedicated writable workspace at
+`~/anigate-workspace` (override with `ANIGATE_MAX_WORKSPACE_DIR`). Widen the
+Max workspace deliberately by editing the config.
+
 Run Mini over local HTTP:
 
 ```bash

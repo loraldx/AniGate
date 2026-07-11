@@ -59,6 +59,10 @@ cd AniGate
 ~/.config/anigate/anigate.json
 ```
 
+默认配置中，Mini 是家目录的只读视图；Max 与 legacy 配置使用独立的可写工作区
+`~/anigate-workspace`（可用 `ANIGATE_MAX_WORKSPACE_DIR` 覆盖）。如需扩大 Max
+的工作区范围，请在配置中显式修改。
+
 Mini 本地 HTTP 模式：
 
 ```bash
