@@ -347,6 +347,91 @@ func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
 	}
 }
 
+// publishFixture builds a service around a real single-commit git repo with a
+// task record pointing at it, for exercising the publish token flow locally.
+func publishFixture(t *testing.T) (*Service, TaskRecord, string) {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "clone")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(repo, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(repo, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(repo, "commit", "-m", "one"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		StateDir:   filepath.Join(root, "state"),
+		Workspaces: []Workspace{{Name: "work", Path: root, Profile: "agent"}},
+		Projects:   []Project{{Name: "demo", Workspace: "work", Path: "clone", RemoteURL: "https://example.invalid/x.git", DefaultBranch: "main", AllowPush: true}},
+	}
+	svc, err := NewService(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := TaskRecord{ID: "20200101T000000-ffffffffffff", Project: "demo", State: "active", Workspace: "work", Worktree: repo, Branch: "anigate/x"}
+	if err := svc.writeTask(task); err != nil {
+		t.Fatal(err)
+	}
+	return svc, task, repo
+}
+
+// Issue #33: a publish confirm token must be bound to the HEAD it previewed.
+func TestPublishTokenBoundToHead(t *testing.T) {
+	svc, task, repo := publishFixture(t)
+	prev, err := svc.publishPreview(map[string]any{"task_id": task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := prev["confirm_token"].(string)
+	if _, _, _, err := svc.verifyPublishToken(map[string]any{"task_id": task.ID, "confirm_token": token}); err != nil {
+		t.Fatalf("token should verify while HEAD is unchanged: %v", err)
+	}
+	// A new commit lands after the preview: the stale token must be rejected.
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(repo, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGitExternal(repo, "commit", "-m", "two"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.publishBranch(map[string]any{"task_id": task.ID, "confirm_token": token}); err == nil {
+		t.Fatal("expected the stale token to be rejected after a new commit")
+	}
+}
+
+// Issue #36: expired publish tokens are swept when a new preview is issued.
+func TestPublishPreviewSweepsExpiredTokens(t *testing.T) {
+	svc, task, _ := publishFixture(t)
+	stale := publishTokenRecord{
+		Token:     "deadbeefdeadbeefdeadbeefdeadbeef",
+		TaskID:    task.ID,
+		Project:   task.Project,
+		Branch:    task.Branch,
+		CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	}
+	if err := svc.writePublishToken(stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.publishPreview(map[string]any{"task_id": task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cfg.StateDir, "publish_tokens", stale.Token+".json")); !os.IsNotExist(err) {
+		t.Fatalf("expired token file was not swept: %v", err)
+	}
+}
+
 // Issue #19: agent session updates must be serialized and finalized cleanly.
 func TestAgentSessionUpdatesAreSerialized(t *testing.T) {
 	svc, _ := testService(t)

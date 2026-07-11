@@ -33,6 +33,7 @@ type publishTokenRecord struct {
 	TaskID    string    `json:"task_id"`
 	Project   string    `json:"project"`
 	Branch    string    `json:"branch"`
+	HeadSHA   string    `json:"head_sha"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -479,11 +480,18 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 	if pending {
 		return nil, fmt.Errorf("task has uncommitted changes; call task.commit_preview then task.commit before publish.preview")
 	}
+	head, err := s.runGitOutput(task.Worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, err
+	}
 	token, err := newPublishToken()
 	if err != nil {
 		return nil, err
 	}
-	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
+	s.sweepExpiredPublishTokens()
+	// The token is bound to the exact HEAD being previewed; commits landing
+	// after the preview invalidate it, mirroring the task.commit fingerprint gate.
+	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, HeadSHA: strings.TrimSpace(head), CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
 	if err := s.writePublishToken(rec); err != nil {
 		return nil, err
 	}
@@ -733,7 +741,32 @@ func (s *Service) writePublishToken(rec publishTokenRecord) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, rec.Token+".json"), b, 0o600)
+	return writeFileAtomic(filepath.Join(dir, rec.Token+".json"), b, 0o600)
+}
+
+// sweepExpiredPublishTokens removes token files that can never verify again
+// (expired or unreadable), so publish_tokens/ does not grow forever.
+func (s *Service) sweepExpiredPublishTokens() {
+	dir := filepath.Join(s.cfg.StateDir, "publish_tokens")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec publishTokenRecord
+		if err := json.Unmarshal(b, &rec); err != nil || now.After(rec.ExpiresAt) {
+			os.Remove(path)
+		}
+	}
 }
 
 func (s *Service) deletePublishToken(token string) error {
@@ -762,6 +795,13 @@ func (s *Service) verifyPublishToken(args map[string]any) (TaskRecord, Project, 
 	}
 	if rec.TaskID != task.ID || rec.Branch != task.Branch || time.Now().UTC().After(rec.ExpiresAt) {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token is expired or does not match task")
+	}
+	head, err := s.runGitOutput(task.Worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return TaskRecord{}, Project{}, publishTokenRecord{}, err
+	}
+	if rec.HeadSHA == "" || strings.TrimSpace(head) != rec.HeadSHA {
+		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token no longer matches the worktree HEAD; run publish.preview again")
 	}
 	project, err := s.requireProject(task.Project)
 	if err != nil {
