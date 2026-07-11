@@ -350,6 +350,27 @@ func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
 	}
 }
 
+// file.search must not read file contents through a workspace-internal symlink
+// that points outside the workspace root (path-confinement bypass).
+func TestFileSearchDoesNotFollowEscapingSymlink(t *testing.T) {
+	svc, root := testService(t)
+	// A secret outside the workspace, and an in-tree symlink pointing at it.
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("TOPSECRET-needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	got, err := svc.fileSearch(map[string]any{"workspace": "test", "query": "TOPSECRET-needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results := got["results"].([]map[string]any); len(results) != 0 {
+		t.Fatalf("file.search leaked out-of-tree content through a symlink: %#v", results)
+	}
+}
+
 // Issue #34: limits above the documented maximum clamp to the maximum instead
 // of silently resetting to a small default.
 func TestLimitsClampToDocumentedMax(t *testing.T) {

@@ -661,6 +661,14 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 			}
 			return nil
 		}
+		// Skip symlinks: WalkDir Lstats entries, so a link's own size passes the
+		// byte guard while os.ReadFile would follow it and read the target's
+		// contents — an out-of-tree link (e.g. -> /etc/passwd) would bypass path
+		// confinement. Every other content reader routes through policy.resolve,
+		// which rejects such escapes; file.search must not be the exception.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil || info.Size() > s.cfg.MaxSearchFileBytes {
 			return nil
