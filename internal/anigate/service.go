@@ -525,8 +525,11 @@ func (s *Service) fsList(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	maxEntries := intArgDefault(args, "max_entries", 100)
-	if maxEntries <= 0 || maxEntries > 500 {
+	if maxEntries <= 0 {
 		maxEntries = 100
+	}
+	if maxEntries > 500 {
+		maxEntries = 500
 	}
 	entries, err := os.ReadDir(rp.Abs)
 	if err != nil {
@@ -634,8 +637,11 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	maxResults := intArgDefault(args, "max_results", s.cfg.MaxSearchResults)
-	if maxResults <= 0 || maxResults > 200 {
+	if maxResults <= 0 {
 		maxResults = s.cfg.MaxSearchResults
+	}
+	if maxResults > 200 {
+		maxResults = 200
 	}
 	caseSensitive := boolArg(args, "case_sensitive")
 	needle := query

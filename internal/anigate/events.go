@@ -105,8 +105,11 @@ func (l *EventLog) Tail(limit int, filter EventFilter) ([]Event, error) {
 	if l == nil {
 		return nil, errors.New("event log is not configured")
 	}
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	f, err := os.Open(l.path)
 	if errors.Is(err, os.ErrNotExist) {

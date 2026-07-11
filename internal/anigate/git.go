@@ -82,8 +82,11 @@ func (s *Service) gitLog(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	limit := intArgDefault(args, "limit", 20)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	maxBytes := int64ArgDefault(args, "max_bytes", s.cfg.MaxReadBytes)
 	cmdArgs := []string{"log", "--oneline", "--decorate", "-n", fmt.Sprint(limit)}

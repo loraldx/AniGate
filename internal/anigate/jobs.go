@@ -188,8 +188,11 @@ func (m *JobManager) Status(id string) (JobRecord, error) {
 }
 
 func (m *JobManager) List(limit int, state JobState) ([]JobRecord, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -281,8 +284,11 @@ func (m *JobManager) LogsTail(id string, maxBytes int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if maxBytes <= 0 || maxBytes > m.cfg.MaxJobLogBytes {
+	if maxBytes <= 0 {
 		maxBytes = 4096
+	}
+	if maxBytes > m.cfg.MaxJobLogBytes {
+		maxBytes = m.cfg.MaxJobLogBytes
 	}
 	f, err := os.Open(rec.LogPath)
 	if err != nil {

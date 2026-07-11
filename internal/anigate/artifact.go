@@ -35,8 +35,11 @@ type ArtifactRef struct {
 
 func (s *Service) artifactList(args map[string]any) (map[string]any, error) {
 	limit := intArgDefault(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	kind := stringArg(args, "kind")
 	records, err := s.listArtifacts(limit, kind)
@@ -99,8 +102,11 @@ func (s *Service) artifactSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	maxResults := intArgDefault(args, "max_results", 50)
-	if maxResults <= 0 || maxResults > 200 {
+	if maxResults <= 0 {
 		maxResults = 50
+	}
+	if maxResults > 200 {
+		maxResults = 200
 	}
 	caseSensitive := boolArg(args, "case_sensitive")
 	needle := query

@@ -199,6 +199,12 @@ func (s *Service) handoffSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	limit := intArgDefault(args, "max_results", 20)
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
 	records, err := s.listHandoffs(1000)
 	if err != nil {
 		return nil, err

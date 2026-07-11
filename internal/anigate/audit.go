@@ -6,8 +6,11 @@ import (
 
 func (s *Service) auditSummary(args map[string]any) (map[string]any, error) {
 	sinceSec := int64ArgDefault(args, "since_sec", 24*3600)
-	if sinceSec <= 0 || sinceSec > 31*24*3600 {
+	if sinceSec <= 0 {
 		sinceSec = 24 * 3600
+	}
+	if sinceSec > 31*24*3600 {
+		sinceSec = 31 * 24 * 3600
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(sinceSec) * time.Second)
 	byKind := map[string]int{}

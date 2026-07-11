@@ -348,6 +348,39 @@ func TestPublishPreviewRefusesWhenGitStatusFails(t *testing.T) {
 	}
 }
 
+// Issue #34: limits above the documented maximum clamp to the maximum instead
+// of silently resetting to a small default.
+func TestLimitsClampToDocumentedMax(t *testing.T) {
+	svc, root := testService(t)
+	// fs.list: 120 files and a request for 501 must yield >100 entries (old
+	// behavior reset to the default of 100).
+	for i := 0; i < 120; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%03d.txt", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := svc.fsList(map[string]any{"workspace": "test", "max_entries": float64(501)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(got["entries"].([]map[string]any)); n <= 100 {
+		t.Fatalf("fs.list reset to the old default: %d entries", n)
+	}
+	// events.Tail: a request for 500 must clamp to 200, not reset to 50.
+	for i := 0; i < 250; i++ {
+		if err := svc.events.Append(Event{Kind: "k"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := svc.events.Tail(500, EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 200 {
+		t.Fatalf("events.Tail(500) returned %d events, want 200", len(events))
+	}
+}
+
 // Issue #37: file.search must keep matching after lines longer than bufio's
 // 64 KiB scanner token limit.
 func TestFileSearchSurvivesLongLines(t *testing.T) {

@@ -83,12 +83,18 @@ func (s *Service) fsTree(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	depth := intArgDefault(args, "depth", 2)
-	if depth < 0 || depth > 8 {
+	if depth < 0 {
 		depth = 2
 	}
+	if depth > 8 {
+		depth = 8
+	}
 	maxEntries := intArgDefault(args, "max_entries", 200)
-	if maxEntries <= 0 || maxEntries > 2000 {
+	if maxEntries <= 0 {
 		maxEntries = 200
+	}
+	if maxEntries > 2000 {
+		maxEntries = 2000
 	}
 	count := 0
 	truncated := false

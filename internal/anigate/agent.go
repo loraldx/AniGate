@@ -239,8 +239,11 @@ func (s *Service) agentMessagesTail(args map[string]any) (map[string]any, error)
 
 func (s *Service) agentSessionList(args map[string]any) (map[string]any, error) {
 	limit := intArgDefault(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	dir := filepath.Join(s.cfg.StateDir, "agents", "sessions")
 	entries, err := os.ReadDir(dir)
@@ -336,8 +339,11 @@ func (s *Service) readAgentMessages(sessionID string, limit int) ([]AgentMessage
 	if !validName(sessionID) {
 		return nil, fmt.Errorf("invalid session_id")
 	}
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	f, err := os.Open(filepath.Join(s.cfg.StateDir, "agents", "messages", sessionID+".ndjson"))
 	if errors.Is(err, os.ErrNotExist) {

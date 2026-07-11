@@ -425,8 +425,11 @@ func (s *Service) taskTimeline(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid task_id")
 	}
 	limit := intArgDefault(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	// Filter by task_id during the scan so the window applies to this task's
 	// events, not the last N events across every task and tool.
@@ -443,6 +446,12 @@ func (s *Service) taskSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	limit := intArgDefault(args, "max_results", 50)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
 	tasks, err := s.listTasks("", 1000)
 	if err != nil {
 		return nil, err
