@@ -192,9 +192,10 @@ func toInt64(value any) (int64, error) {
 func validateCommandPlaceholders(label string, command []string, names map[string]bool) error {
 	for _, token := range command {
 		for _, name := range findPlaceholders(token) {
-			if name == "prompt" {
-				continue
-			}
+			// This validator is only invoked for presets. {prompt} is reserved
+			// for agent commands and can never be satisfied by a preset arg, so
+			// a preset must declare an arg of that name or the token is rejected
+			// rather than passing load and failing every execution.
 			if !names[name] {
 				return fmt.Errorf("%s uses unknown placeholder %q", label, name)
 			}

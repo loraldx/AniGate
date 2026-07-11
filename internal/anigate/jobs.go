@@ -152,6 +152,12 @@ func (m *JobManager) RunPreset(ctx context.Context, name string, args map[string
 }
 
 func (m *JobManager) RunCommand(ctx context.Context, spec JobSpec, async bool) (JobRecord, string, error) {
+	// An empty argv would panic run() at spec.Command[0]; for async jobs that
+	// panic is unrecovered (context.Background goroutine) and crashes the
+	// process. Reject it here so it surfaces as a tool error instead.
+	if len(spec.Command) == 0 || spec.Command[0] == "" {
+		return JobRecord{}, "", fmt.Errorf("command rendered to an empty argv")
+	}
 	job, err := m.newRecord(spec)
 	if err != nil {
 		return JobRecord{}, "", err
@@ -377,6 +383,10 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 		rec.Error = err.Error()
 		rec.FinishedAt = time.Now().UTC()
 		_ = m.writeRecord(rec)
+		// Mirror the success path's finish bookkeeping: without the event and
+		// OnFinish, the job_started/job_finished pairing breaks and an agent
+		// session that relies on OnFinish stays wedged in "running" forever.
+		m.finishJob(rec, spec)
 		return rec
 	}
 	defer logFile.Close()
@@ -419,6 +429,14 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 		_, _ = fmt.Fprintln(logFile, "\n[anigate: log truncated]")
 	}
 	_ = m.writeRecord(rec)
+	m.finishJob(rec, spec)
+	return rec
+}
+
+// finishJob emits the job_finished audit event and runs the OnFinish hook.
+// Both the normal completion path and the early log-open failure path call it
+// so the audit start/finish pairing and the session-state reset never diverge.
+func (m *JobManager) finishJob(rec JobRecord, spec JobSpec) {
 	m.events.Append(Event{
 		Kind:      "job_finished",
 		Tool:      spec.EventTool,
@@ -432,7 +450,6 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 	if spec.OnFinish != nil {
 		spec.OnFinish(rec)
 	}
-	return rec
 }
 
 func (m *JobManager) buildEnv(extra map[string]string) []string {

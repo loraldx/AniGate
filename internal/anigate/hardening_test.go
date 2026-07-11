@@ -550,6 +550,106 @@ func TestServeHTTPGracefulShutdown(t *testing.T) {
 	}
 }
 
+// Fresh-audit F1: a forged artifact record must not read files outside the
+// artifacts dir — readArtifactRecord reconstructs the path from the id.
+func TestArtifactRecordPathCannotEscape(t *testing.T) {
+	svc, root := testService(t)
+	artDir := filepath.Join(svc.cfg.StateDir, "artifacts")
+	if err := os.MkdirAll(artDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(root, "outside-secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A forged record whose Path points at an arbitrary absolute file.
+	forged := ArtifactRecord{ID: "evil", Kind: "text", Path: secret, Bytes: 9}
+	b, _ := json.Marshal(forged)
+	if err := os.WriteFile(filepath.Join(artDir, "evil.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := svc.readArtifactRecord("evil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Path == secret {
+		t.Fatal("readArtifactRecord trusted the forged absolute path")
+	}
+	want := filepath.Join(artDir, "evil.txt")
+	if rec.Path != want {
+		t.Fatalf("path not reconstructed: got %q want %q", rec.Path, want)
+	}
+	// artifact.read_range must not return the out-of-workspace file's bytes.
+	got, err := svc.artifactReadRange(map[string]any{"artifact_id": "evil"})
+	if err == nil {
+		if text, _ := got["text"].(string); strings.Contains(text, "TOPSECRET") {
+			t.Fatal("artifact.read_range leaked an out-of-workspace file")
+		}
+	}
+}
+
+// Fresh-audit F10: a preset that renders to an empty argv must be rejected, not
+// panic run() (which would crash the process for async jobs).
+func TestEmptyRenderedCommandRejected(t *testing.T) {
+	svc, _ := testService(t)
+	_, _, err := svc.jobs.RunCommand(contextWithBackground(), JobSpec{Kind: "command", Workspace: "test", Cwd: ".", Command: []string{}}, false)
+	if err == nil {
+		t.Fatal("expected an empty-argv command to be rejected")
+	}
+	if !strings.Contains(err.Error(), "empty argv") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Fresh-audit F6: a preset whose command uses {prompt} with no matching arg is
+// rejected at config load instead of failing every execution.
+func TestPresetPromptPlaceholderRejectedAtLoad(t *testing.T) {
+	err := validateCommandPlaceholders("preset x", []string{"tool", "{prompt}"}, map[string]bool{})
+	if err == nil {
+		t.Fatal("expected {prompt} with no matching preset arg to be rejected")
+	}
+	// A declared arg named prompt is still accepted.
+	if err := validateCommandPlaceholders("preset x", []string{"tool", "{prompt}"}, map[string]bool{"prompt": true}); err != nil {
+		t.Fatalf("declared prompt arg should be accepted: %v", err)
+	}
+}
+
+// Fresh-audit F11: when run() cannot open its log file, it must still emit
+// job_finished and call OnFinish so agent sessions do not wedge in "running".
+func TestJobFinishBookkeepingOnLogOpenFailure(t *testing.T) {
+	svc, root := testService(t)
+	var finished bool
+	spec := JobSpec{
+		Kind:      "command",
+		Workspace: "test",
+		Cwd:       ".",
+		Command:   []string{"true"},
+		EventTool: "app.run_preset",
+		OnFinish:  func(JobRecord) { finished = true },
+	}
+	rec, err := svc.jobs.newRecord(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force the log open to fail by pointing LogPath at a directory.
+	badLog := filepath.Join(root, "logdir")
+	if err := os.MkdirAll(badLog, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec.LogPath = badLog
+	out := svc.jobs.run(contextWithBackground(), spec, rec)
+	if out.State != JobFailed {
+		t.Fatalf("expected JobFailed on log-open failure, got %s", out.State)
+	}
+	if !finished {
+		t.Fatal("OnFinish was not called on the log-open failure path")
+	}
+	events, _ := svc.events.Tail(20, EventFilter{Kind: "job_finished"})
+	if len(events) == 0 {
+		t.Fatal("no job_finished event emitted on the log-open failure path")
+	}
+}
+
 // publishFixture builds a service around a real single-commit git repo with a
 // task record pointing at it, for exercising the publish token flow locally.
 func publishFixture(t *testing.T) (*Service, TaskRecord, string) {

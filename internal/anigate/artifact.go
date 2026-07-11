@@ -298,9 +298,11 @@ func (s *Service) readArtifactRecord(id string) (ArtifactRecord, error) {
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return ArtifactRecord{}, err
 	}
-	if rec.Path == "" || !filepath.IsAbs(rec.Path) {
-		return ArtifactRecord{}, fmt.Errorf("artifact record has invalid path")
-	}
+	// Never trust the stored Path: artifact content always lives at
+	// <state_dir>/artifacts/<id>.txt. Reconstructing it from the validated id
+	// stops a forged record's Path (writable if state_dir sits inside a
+	// workspace) from escaping into an arbitrary os.Open outside confinement.
+	rec.Path = filepath.Join(s.cfg.StateDir, "artifacts", id+".txt")
 	return rec, nil
 }
 
