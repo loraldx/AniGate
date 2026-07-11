@@ -2,6 +2,7 @@ package anigate
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -505,6 +506,26 @@ func TestProtocolConformance(t *testing.T) {
 	b, _ = json.Marshal(resp)
 	if !strings.Contains(string(b), `"protocolVersion":"2025-06-18"`) {
 		t.Fatalf("unsupported version should fall back to latest: %s", b)
+	}
+}
+
+// Issue #46: HTTP mode shuts down gracefully and reports a clean exit.
+func TestServeHTTPGracefulShutdown(t *testing.T) {
+	svc, _ := testService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveHTTP(ctx, "127.0.0.1:0", svc, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful shutdown should return nil, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down after cancellation")
 	}
 }
 

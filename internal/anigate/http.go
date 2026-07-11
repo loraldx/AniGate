@@ -1,18 +1,30 @@
 package anigate
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
+// ServeHTTP serves until the listener fails or SIGINT/SIGTERM arrives, then
+// shuts down gracefully and returns nil so the CLI can exit 0.
 func ServeHTTP(addr string, svc *Service, log *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return serveHTTP(ctx, addr, svc, log)
+}
+
+func serveHTTP(ctx context.Context, addr string, svc *Service, log *slog.Logger) error {
 	if err := httpListenRequiresToken(addr, svc.cfg.AuthToken); err != nil {
 		return err
 	}
@@ -51,7 +63,23 @@ func ServeHTTP(addr string, svc *Service, log *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	log.Info("serving anigate http", "addr", addr)
-	return server.ListenAndServe()
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		log.Info("shutting down anigate http")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 func authorized(r *http.Request, token string) bool {
