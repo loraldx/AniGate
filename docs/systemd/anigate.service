@@ -4,7 +4,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/anigate http --addr 127.0.0.1:8787 --config %h/.config/anigate/anigate.json
+# 8789 keeps the legacy Max alias off 8787 (Mini) and 8788 (Max), so all
+# three services can be enabled side by side.
+ExecStart=%h/.local/bin/anigate http --addr 127.0.0.1:8789 --config %h/.config/anigate/anigate.json
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

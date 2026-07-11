@@ -10,13 +10,19 @@ MINI_CONFIG_FILE=${ANIGATE_MINI_CONFIG_FILE:-"$CONFIG_DIR/anigate-mini.json"}
 MAX_CONFIG_FILE=${ANIGATE_MAX_CONFIG_FILE:-"$CONFIG_DIR/anigate-max.json"}
 LEGACY_CONFIG_FILE=${ANIGATE_CONFIG_FILE:-"$CONFIG_DIR/anigate.json"}
 WORKSPACE_DIR=${ANIGATE_WORKSPACE_DIR:-"$HOME"}
+# Max gets write+agent access, so its default workspace is a dedicated
+# directory instead of the whole home directory. Widen deliberately.
+MAX_WORKSPACE_DIR=${ANIGATE_MAX_WORKSPACE_DIR:-"$HOME/anigate-workspace"}
 TOKEN=${ANIGATE_AUTH_TOKEN:-}
 
 if [ -z "$TOKEN" ]; then
   if command -v openssl >/dev/null 2>&1; then
     TOKEN=$(openssl rand -hex 24)
+  elif [ -r /dev/urandom ]; then
+    TOKEN=$(od -vN 24 -An -tx1 /dev/urandom | tr -d ' \n')
   else
-    TOKEN=$(date +%s | sha256sum | awk '{print $1}')
+    echo "error: no CSPRNG available (need openssl or /dev/urandom); set ANIGATE_AUTH_TOKEN explicitly" >&2
+    exit 1
   fi
 fi
 
@@ -65,8 +71,8 @@ write_max_config() {
   "isolated_home": true,
   "workspaces": [
     {
-      "name": "home",
-      "path": "$WORKSPACE_DIR",
+      "name": "workspace",
+      "path": "$MAX_WORKSPACE_DIR",
       "read_only": false,
       "profile": "agent"
     }
@@ -75,7 +81,7 @@ write_max_config() {
     {
       "name": "sys_uptime",
       "description": "Show system uptime",
-      "workspace": "home",
+      "workspace": "workspace",
       "cwd": ".",
       "command": ["uptime"],
       "timeout_sec": 10,
@@ -87,7 +93,7 @@ write_max_config() {
       "name": "echo_agent",
       "description": "Development placeholder that echoes the session prompt",
       "provider": "echo",
-      "workspace": "home",
+      "workspace": "workspace",
       "cwd": ".",
       "command": ["printf", "{prompt}"],
       "timeout_sec": 30,
@@ -99,7 +105,7 @@ write_max_config() {
 EOF
 }
 
-mkdir -p "$BINDIR" "$CONFIG_DIR" "$STATE_DIR"
+mkdir -p "$BINDIR" "$CONFIG_DIR" "$STATE_DIR" "$MAX_WORKSPACE_DIR"
 
 cd "$ROOT"
 for name in anigate-mini anigate-max anigate; do
@@ -141,9 +147,12 @@ Binaries:
   $BINDIR/anigate  (legacy alias for Max)
 
 Configs:
-  Mini: $MINI_CONFIG_FILE
-  Max:  $MAX_CONFIG_FILE
+  Mini: $MINI_CONFIG_FILE (read-only view of $WORKSPACE_DIR)
+  Max:  $MAX_CONFIG_FILE (writable agent workspace: $MAX_WORKSPACE_DIR)
   Legacy Max: $LEGACY_CONFIG_FILE
+
+Max defaults to the dedicated workspace above; widen it deliberately by
+editing the config or re-running with ANIGATE_MAX_WORKSPACE_DIR set.
 
 Try Mini stdio mode:
   $BINDIR/anigate-mini stdio --config "$MINI_CONFIG_FILE"
