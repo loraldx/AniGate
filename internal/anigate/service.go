@@ -312,6 +312,10 @@ func objectSchema(props map[string]any) map[string]any {
 }
 
 func (s *Service) CallTool(name string, raw json.RawMessage) (any, error) {
+	if err := s.requireToolForProduct(name); err != nil {
+		s.events.Append(Event{Kind: "tool_call", Tool: name, OK: false, Message: errorString(err)})
+		return nil, err
+	}
 	var args map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
