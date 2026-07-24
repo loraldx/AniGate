@@ -1,14 +1,12 @@
 package anigate
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,6 +33,7 @@ type publishTokenRecord struct {
 	TaskID    string    `json:"task_id"`
 	Project   string    `json:"project"`
 	Branch    string    `json:"branch"`
+	HeadSHA   string    `json:"head_sha"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -74,10 +73,12 @@ func (s *Service) projectEnsure(args map[string]any) (map[string]any, error) {
 	}
 	created := false
 	if _, err := os.Stat(filepath.Join(rp.Abs, ".git")); err == nil {
-		if _, err := s.runGitOutput(rp.Abs, "remote", "set-url", "origin", project.RemoteURL); err != nil {
+		// These two commands carry the remote URL in args/stderr; they must go
+		// through the sanitized runner so embedded credentials never reach errors.
+		if err := runGitExternal(rp.Abs, "remote", "set-url", "origin", project.RemoteURL); err != nil {
 			return nil, err
 		}
-		if _, err := s.runGitOutput(rp.Abs, "fetch", "--all", "--prune"); err != nil {
+		if err := runGitNetwork(rp.Abs, "fetch", "--all", "--prune"); err != nil {
 			return nil, err
 		}
 	} else {
@@ -87,7 +88,7 @@ func (s *Service) projectEnsure(args map[string]any) (map[string]any, error) {
 		if _, err := os.Stat(rp.Abs); err == nil {
 			return nil, fmt.Errorf("project path exists but is not a git repository")
 		}
-		if err := runGitExternal(filepath.Dir(rp.Abs), "clone", project.RemoteURL, rp.Abs); err != nil {
+		if err := runGitNetwork(filepath.Dir(rp.Abs), "clone", project.RemoteURL, rp.Abs); err != nil {
 			return nil, err
 		}
 		created = true
@@ -293,7 +294,7 @@ func (s *Service) taskDigest(args map[string]any) (map[string]any, error) {
 	status, _ := s.runGitOutput(task.Worktree, "status", "--porcelain=v1", "--branch")
 	diffStat, _ := s.runGitOutput(task.Worktree, "diff", "--stat")
 	digest := strings.TrimSpace(fmt.Sprintf("Task %s (%s)\nProject: %s\nBranch: %s\nState: %s\nStatus:\n%s\nDiff stat:\n%s",
-		task.ID, task.Title, task.Project, task.Branch, task.State, status, diffStat))
+		task.ID, task.Title, task.Project, task.Branch, task.State, trimPreview(status, 4000), trimPreview(diffStat, 4000)))
 	return map[string]any{"task": task, "digest": digest}, nil
 }
 
@@ -311,7 +312,7 @@ func (s *Service) taskFinishPreview(args map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"task": task, "status": status, "diff": text, "truncated": truncated, "next": []string{"task.commit_preview", "handoff.create"}}
+	out := map[string]any{"task": task, "status": trimPreview(status, 4000), "diff": text, "truncated": truncated, "next": []string{"task.commit_preview", "handoff.create"}}
 	s.addArtifactFields(out, ref)
 	return out, nil
 }
@@ -331,7 +332,11 @@ func (s *Service) taskCommitPreview(args map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	if !taskHasPendingChanges(task.Worktree) {
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if !pending {
 		return nil, fmt.Errorf("task has no pending changes to commit")
 	}
 	message := strings.TrimSpace(stringArg(args, "message"))
@@ -347,9 +352,9 @@ func (s *Service) taskCommitPreview(args map[string]any) (map[string]any, error)
 	}
 	out := map[string]any{
 		"task":             task,
-		"status":           status,
+		"status":           trimPreview(status, 4000),
 		"diff":             text,
-		"diff_stat":        diffStat,
+		"diff_stat":        trimPreview(diffStat, 4000),
 		"diff_sha256":      fingerprint,
 		"proposed_message": message,
 		"truncated":        truncated,
@@ -364,6 +369,14 @@ func (s *Service) taskCommit(args map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Refuse to commit while a job (e.g. an async agent turn) bound to this task
+	// is still writing to the worktree; otherwise `git add -A` could stage
+	// in-flight, unpreviewed edits that were never fingerprinted.
+	if running, err := s.taskHasRunningJob(task.ID); err != nil {
+		return nil, err
+	} else if running {
+		return nil, fmt.Errorf("task has a running job; wait for it to finish before committing")
+	}
 	message := strings.TrimSpace(stringArg(args, "message"))
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
@@ -372,7 +385,11 @@ func (s *Service) taskCommit(args map[string]any) (map[string]any, error) {
 	if expected == "" {
 		return nil, fmt.Errorf("expected_diff_sha256 is required")
 	}
-	if !taskHasPendingChanges(task.Worktree) {
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if !pending {
 		return nil, fmt.Errorf("task has no pending changes to commit")
 	}
 	fingerprint, err := s.taskChangeFingerprint(task)
@@ -408,18 +425,17 @@ func (s *Service) taskTimeline(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid task_id")
 	}
 	limit := intArgDefault(args, "limit", 50)
-	events, err := s.events.Tail(200, EventFilter{})
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	// Filter by task_id during the scan so the window applies to this task's
+	// events, not the last N events across every task and tool.
+	selected, err := s.events.Tail(limit, EventFilter{TaskID: taskID})
 	if err != nil {
 		return nil, err
-	}
-	var selected []Event
-	for _, ev := range events {
-		if ev.Fields != nil && ev.Fields["task_id"] == taskID {
-			selected = append(selected, ev)
-		}
-	}
-	if len(selected) > limit {
-		selected = selected[len(selected)-limit:]
 	}
 	return map[string]any{"task_id": taskID, "events": selected, "count": len(selected)}, nil
 }
@@ -430,6 +446,12 @@ func (s *Service) taskSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	limit := intArgDefault(args, "max_results", 50)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
 	tasks, err := s.listTasks("", 1000)
 	if err != nil {
 		return nil, err
@@ -458,14 +480,27 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 	}
 	status, _ := s.runGitOutput(task.Worktree, "status", "--porcelain=v1", "--branch")
 	diffStat, _ := s.runGitOutput(task.Worktree, "diff", "--stat")
-	if taskHasPendingChanges(task.Worktree) {
+	// A git failure must not fall open here: minting a publish token for a
+	// worktree whose cleanliness could not be verified defeats the dirty check.
+	pending, err := taskHasPendingChanges(task.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if pending {
 		return nil, fmt.Errorf("task has uncommitted changes; call task.commit_preview then task.commit before publish.preview")
+	}
+	head, err := gitHeadSHA(task.Worktree)
+	if err != nil {
+		return nil, err
 	}
 	token, err := newPublishToken()
 	if err != nil {
 		return nil, err
 	}
-	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
+	s.sweepExpiredPublishTokens()
+	// The token is bound to the exact HEAD being previewed; commits landing
+	// after the preview invalidate it, mirroring the task.commit fingerprint gate.
+	rec := publishTokenRecord{Token: token, TaskID: task.ID, Project: task.Project, Branch: task.Branch, HeadSHA: head, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(30 * time.Minute)}
 	if err := s.writePublishToken(rec); err != nil {
 		return nil, err
 	}
@@ -476,8 +511,8 @@ func (s *Service) publishPreview(args map[string]any) (map[string]any, error) {
 		"remote_url":    redactRemoteURL(project.RemoteURL),
 		"allow_push":    project.AllowPush,
 		"allow_pr":      project.AllowPR,
-		"status":        status,
-		"diff_stat":     diffStat,
+		"status":        trimPreview(status, 4000),
+		"diff_stat":     trimPreview(diffStat, 4000),
 		"confirm_token": token,
 		"expires_at":    rec.ExpiresAt,
 		"next":          []string{"publish.branch", "publish.pr_create"},
@@ -498,7 +533,9 @@ func (s *Service) publishBranch(args map[string]any) (map[string]any, error) {
 	if err := s.deletePublishToken(rec.Token); err != nil {
 		return nil, err
 	}
-	if err := runGitExternal(task.Worktree, "push", "-u", "origin", task.Branch); err != nil {
+	// Push the exact SHA the token verified, not the branch name: a commit
+	// racing in after verification must not ride along on the push.
+	if err := runGitNetwork(task.Worktree, "push", "origin", rec.HeadSHA+":refs/heads/"+task.Branch); err != nil {
 		return nil, err
 	}
 	s.events.Append(Event{Kind: "publish_branch", Tool: "publish.branch", OK: true, Fields: map[string]any{"task_id": task.ID, "project": task.Project, "branch": task.Branch}})
@@ -528,7 +565,7 @@ func (s *Service) publishPRCreate(args map[string]any) (map[string]any, error) {
 	if err := s.deletePublishToken(rec.Token); err != nil {
 		return nil, err
 	}
-	out, err := runExternalOutput(task.Worktree, "gh", cmdArgs...)
+	out, err := runHostCommand(task.Worktree, hostCmdOpts{Timeout: gitNetworkTimeout}, "gh", cmdArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -684,14 +721,26 @@ func (s *Service) taskChangeFingerprint(task TaskRecord) (string, error) {
 	return sha256Hex([]byte(b.String())), nil
 }
 
-func taskHasPendingChanges(worktree string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain=v1")
-	cmd.Dir = worktree
-	cmd.Env = []string{"PATH=" + pathEnv()}
-	b, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(b)) != ""
+func (s *Service) taskHasRunningJob(taskID string) (bool, error) {
+	jobs, err := s.jobs.List(200, JobRunning)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.TaskID == taskID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func taskHasPendingChanges(worktree string) (bool, error) {
+	// StdoutOnly: stderr warnings must not be mistaken for pending changes.
+	out, err := runHostCommand(worktree, hostCmdOpts{StdoutOnly: true}, "git", "status", "--porcelain=v1")
+	if err != nil {
+		return false, fmt.Errorf("git status failed in task worktree: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 func (s *Service) writePublishToken(rec publishTokenRecord) error {
@@ -703,7 +752,32 @@ func (s *Service) writePublishToken(rec publishTokenRecord) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, rec.Token+".json"), b, 0o600)
+	return writeFileAtomic(filepath.Join(dir, rec.Token+".json"), b, 0o600)
+}
+
+// sweepExpiredPublishTokens removes token files that can never verify again
+// (expired or unreadable), so publish_tokens/ does not grow forever.
+func (s *Service) sweepExpiredPublishTokens() {
+	dir := filepath.Join(s.cfg.StateDir, "publish_tokens")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec publishTokenRecord
+		if err := json.Unmarshal(b, &rec); err != nil || now.After(rec.ExpiresAt) {
+			os.Remove(path)
+		}
+	}
 }
 
 func (s *Service) deletePublishToken(token string) error {
@@ -733,6 +807,13 @@ func (s *Service) verifyPublishToken(args map[string]any) (TaskRecord, Project, 
 	if rec.TaskID != task.ID || rec.Branch != task.Branch || time.Now().UTC().After(rec.ExpiresAt) {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token is expired or does not match task")
 	}
+	head, err := gitHeadSHA(task.Worktree)
+	if err != nil {
+		return TaskRecord{}, Project{}, publishTokenRecord{}, err
+	}
+	if rec.HeadSHA == "" || head != rec.HeadSHA {
+		return TaskRecord{}, Project{}, publishTokenRecord{}, fmt.Errorf("publish token no longer matches the worktree HEAD; run publish.preview again")
+	}
 	project, err := s.requireProject(task.Project)
 	if err != nil {
 		return TaskRecord{}, Project{}, publishTokenRecord{}, err
@@ -753,20 +834,43 @@ func runGitExternal(cwd string, args ...string) error {
 	return err
 }
 
-func runExternalOutput(cwd, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitToolTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = cwd
-	cmd.Env = []string{"PATH=" + pathEnv()}
-	b, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("%s command timed out", name)
-	}
+// gitHeadSHA resolves the worktree HEAD from stdout only, so stderr warnings
+// can never pollute a SHA that is stored or compared.
+func gitHeadSHA(worktree string) (string, error) {
+	out, err := runHostCommand(worktree, hostCmdOpts{StdoutOnly: true}, "git", "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("%s %s failed: %s", name, sanitizeCommandText(strings.Join(args, " ")), sanitizeCommandText(trimPreview(string(b), 500)))
+		return "", err
 	}
-	return string(b), nil
+	return strings.TrimSpace(out), nil
+}
+
+// gitIdentityEnv supplies a default author/committer identity for git
+// subprocesses, whose environment is otherwise stripped of HOME and GIT_* vars.
+func gitIdentityEnv() []string {
+	return []string{
+		"GIT_AUTHOR_NAME=AniGate",
+		"GIT_AUTHOR_EMAIL=anigate@localhost",
+		"GIT_COMMITTER_NAME=AniGate",
+		"GIT_COMMITTER_EMAIL=anigate@localhost",
+	}
+}
+
+func runExternalOutput(cwd, name string, args ...string) (string, error) {
+	opts := hostCmdOpts{}
+	if name == "git" {
+		// The subprocess env is stripped (no HOME), so git cannot read the
+		// user's global identity. Provide a default bot identity so task.commit
+		// works out of the box instead of failing with "empty ident name".
+		opts.ExtraEnv = gitIdentityEnv()
+	}
+	return runHostCommand(cwd, opts, name, args...)
+}
+
+// runGitNetwork is runGitExternal with the longer network timeout for git
+// operations that contact the remote (clone, fetch, push).
+func runGitNetwork(cwd string, args ...string) error {
+	_, err := runHostCommand(cwd, hostCmdOpts{Timeout: gitNetworkTimeout, ExtraEnv: gitIdentityEnv()}, "git", args...)
+	return err
 }
 
 func redactRemoteURL(remote string) string {

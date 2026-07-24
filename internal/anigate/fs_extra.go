@@ -4,12 +4,66 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+// readBoundedText reads up to limit bytes from path for building a preview diff.
+// It reports whether the file was truncated at the cap and the full on-disk size,
+// so callers never load an arbitrarily large file into an inline response.
+func readBoundedText(path string, limit int64) (b []byte, truncated bool, size int64, err error) {
+	if limit <= 0 {
+		limit = defaultMaxReadBytes
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, 0, err
+	}
+	size = info.Size()
+	buf := make([]byte, limit+1)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, false, size, err
+	}
+	if int64(n) > limit {
+		n = int(limit)
+		truncated = true
+	}
+	return buf[:n], truncated, size, nil
+}
+
+// writeFileAtomic writes data to a temp file and renames it into place so a
+// concurrent reader never observes a partially written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// sha256File streams a file's SHA-256 without loading it fully into memory.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 func (s *Service) fsStat(args map[string]any) (map[string]any, error) {
 	rp, err := s.policy.resolve(stringArg(args, "workspace"), stringArgDefault(args, "path", "."))
@@ -29,12 +83,18 @@ func (s *Service) fsTree(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	depth := intArgDefault(args, "depth", 2)
-	if depth < 0 || depth > 8 {
+	if depth < 0 {
 		depth = 2
 	}
+	if depth > 8 {
+		depth = 8
+	}
 	maxEntries := intArgDefault(args, "max_entries", 200)
-	if maxEntries <= 0 || maxEntries > 2000 {
+	if maxEntries <= 0 {
 		maxEntries = 200
+	}
+	if maxEntries > 2000 {
+		maxEntries = 2000
 	}
 	count := 0
 	truncated := false
@@ -116,23 +176,37 @@ func (s *Service) fsWritePreview(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("content exceeds max_read_bytes")
 	}
 	old := ""
-	if b, err := os.ReadFile(rp.Abs); err == nil {
+	oldTruncated := false
+	var oldSize int64
+	if b, truncated, size, err := readBoundedText(rp.Abs, s.cfg.MaxReadBytes); err == nil {
 		if looksBinary(b) {
 			return nil, fmt.Errorf("existing file appears binary")
 		}
 		old = string(b)
-	} else if !boolArg(args, "create") {
+		oldTruncated = truncated
+		oldSize = size
+	} else if !os.IsNotExist(err) || !boolArg(args, "create") {
+		// create only covers a genuinely missing file; permission or I/O
+		// errors must surface instead of producing a misleading new-file diff.
 		return nil, err
 	}
-	diff := simpleUnifiedDiff(filepath.ToSlash(rp.Rel), old, content)
-	return map[string]any{
-		"workspace":   rp.Workspace.Name,
-		"path":        rp.Rel,
-		"would_write": true,
-		"old_bytes":   len(old),
-		"new_bytes":   len(content),
-		"diff":        diff,
-	}, nil
+	rawDiff := simpleUnifiedDiff(filepath.ToSlash(rp.Rel), old, content)
+	diff, truncated, ref, err := s.boundedTextArtifact("fs.write_preview", rp.Rel, rawDiff, s.cfg.MaxReadBytes, map[string]any{"workspace": rp.Workspace.Name, "path": rp.Rel})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"workspace":      rp.Workspace.Name,
+		"path":           rp.Rel,
+		"would_write":    true,
+		"old_bytes":      oldSize,
+		"new_bytes":      len(content),
+		"diff":           diff,
+		"diff_truncated": truncated,
+		"old_truncated":  oldTruncated,
+	}
+	s.addArtifactFields(out, ref)
+	return out, nil
 }
 
 func (s *Service) fileEditApply(args map[string]any) (map[string]any, error) {
@@ -153,40 +227,65 @@ func (s *Service) fileEditApply(args map[string]any) (map[string]any, error) {
 	}
 	create := boolArg(args, "create")
 	old := ""
-	oldBytes, err := os.ReadFile(rp.Abs)
-	if err != nil {
-		if !os.IsNotExist(err) || !create {
-			return nil, err
+	oldTruncated := false
+	var oldSize int64
+	beforeSHA := sha256Hex(nil)
+	oldBytes, truncated, size, readErr := readBoundedText(rp.Abs, s.cfg.MaxReadBytes)
+	if readErr != nil {
+		if !os.IsNotExist(readErr) || !create {
+			return nil, readErr
 		}
 	} else {
 		if looksBinary(oldBytes) {
 			return nil, fmt.Errorf("existing file appears binary")
 		}
 		old = string(oldBytes)
+		oldTruncated = truncated
+		oldSize = size
+		// Hash the full file (not just the bounded prefix) so the integrity
+		// check stays exact even when the diff preview is truncated.
+		if beforeSHA, err = sha256File(rp.Abs); err != nil {
+			return nil, err
+		}
 	}
-	if expected := stringArg(args, "expected_sha256"); expected != "" && expected != sha256Hex(oldBytes) {
+	if expected := stringArg(args, "expected_sha256"); expected != "" && expected != beforeSHA {
 		return nil, fmt.Errorf("expected_sha256 does not match current file")
 	}
-	if expected := stringArg(args, "expected_old_text"); expected != "" && !strings.Contains(old, expected) {
-		return nil, fmt.Errorf("expected_old_text not found in current file")
+	if expected := stringArg(args, "expected_old_text"); expected != "" {
+		if oldTruncated {
+			return nil, fmt.Errorf("existing file is too large to verify expected_old_text; use git.diff/patch.apply")
+		}
+		if !strings.Contains(old, expected) {
+			return nil, fmt.Errorf("expected_old_text not found in current file")
+		}
 	}
-	diff := simpleUnifiedDiff(filepath.ToSlash(rp.Rel), old, content)
+	rawDiff := simpleUnifiedDiff(filepath.ToSlash(rp.Rel), old, content)
 	if err := os.WriteFile(rp.Abs, []byte(content), 0o644); err != nil {
 		return nil, err
 	}
-	s.events.Append(Event{Kind: "file_edited", Tool: "file.edit_apply", Workspace: rp.Workspace.Name, Path: rp.Rel, OK: true, Fields: map[string]any{"actor": "web_gpt_direct"}})
-	return map[string]any{
-		"workspace":     rp.Workspace.Name,
-		"path":          rp.Rel,
-		"written":       true,
-		"old_bytes":     len(old),
-		"new_bytes":     len(content),
-		"before_sha256": sha256Hex(oldBytes),
-		"after_sha256":  sha256Hex([]byte(content)),
-		"diff":          diff,
-		"actor":         "web_gpt_direct",
-		"next":          []string{"task.finish_preview", "git.diff"},
-	}, nil
+	if err := s.events.Append(Event{Kind: "file_edited", Tool: "file.edit_apply", Workspace: rp.Workspace.Name, Path: rp.Rel, OK: true, Fields: map[string]any{"actor": "web_gpt_direct"}}); err != nil {
+		return nil, err
+	}
+	diff, diffTruncated, ref, err := s.boundedTextArtifact("file.edit_apply", rp.Rel, rawDiff, s.cfg.MaxReadBytes, map[string]any{"workspace": rp.Workspace.Name, "path": rp.Rel})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"workspace":      rp.Workspace.Name,
+		"path":           rp.Rel,
+		"written":        true,
+		"old_bytes":      oldSize,
+		"new_bytes":      len(content),
+		"before_sha256":  beforeSHA,
+		"after_sha256":   sha256Hex([]byte(content)),
+		"diff":           diff,
+		"diff_truncated": diffTruncated,
+		"old_truncated":  oldTruncated,
+		"actor":          "web_gpt_direct",
+		"next":           []string{"task.finish_preview", "git.diff"},
+	}
+	s.addArtifactFields(out, ref)
+	return out, nil
 }
 
 func statMap(rp resolvedPath, info os.FileInfo) map[string]any {

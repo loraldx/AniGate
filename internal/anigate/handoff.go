@@ -57,7 +57,7 @@ func (s *Service) workspaceSnapshot(args map[string]any) (map[string]any, error)
 
 func (s *Service) gateStats() (map[string]any, error) {
 	artifactStats, _ := s.artifactStats()
-	jobs, _ := s.jobs.List(1000, "")
+	jobCount, _ := s.jobs.Count("")
 	tasks, _ := s.listTasks("", 1000)
 	agents, _ := s.agentSessionList(map[string]any{"limit": float64(200)})
 	handoffs, _ := s.listHandoffs(1000)
@@ -78,7 +78,7 @@ func (s *Service) gateStats() (map[string]any, error) {
 		"tools":            len(s.Tools()),
 		"workspaces":       len(s.cfg.Workspaces),
 		"projects":         len(s.cfg.Projects),
-		"jobs":             len(jobs),
+		"jobs":             jobCount,
 		"tasks":            len(tasks),
 		"agent_sessions":   agents["count"],
 		"handoffs":         len(handoffs),
@@ -90,17 +90,17 @@ func (s *Service) gateStats() (map[string]any, error) {
 
 func (s *Service) contextHealth() (map[string]any, error) {
 	artifacts, _ := s.listArtifacts(1000, "")
-	jobs, _ := s.jobs.List(1000, "")
+	jobCount, _ := s.jobs.Count("")
 	tasks, _ := s.listTasks("", 1000)
 	events, _ := s.events.Tail(200, EventFilter{})
 	handoffs, _ := s.listHandoffs(1000)
-	score := len(artifacts)*4 + len(jobs)*2 + len(tasks)*6 + len(events)
+	score := len(artifacts)*4 + jobCount*2 + len(tasks)*6 + len(events)
 	level := "green"
 	recommend := false
 	if score >= 180 || len(tasks) >= 8 {
 		level = "red"
 		recommend = true
-	} else if score >= 80 || len(tasks) >= 3 || len(jobs) >= 20 {
+	} else if score >= 80 || len(tasks) >= 3 || jobCount >= 20 {
 		level = "yellow"
 		recommend = true
 	}
@@ -111,7 +111,7 @@ func (s *Service) contextHealth() (map[string]any, error) {
 		"known_limits":      "AniGate cannot see ChatGPT Web's total token count; this is based only on AniGate state and returned-output pressure.",
 		"inputs": map[string]any{
 			"artifacts": len(artifacts),
-			"jobs":      len(jobs),
+			"jobs":      jobCount,
 			"tasks":     len(tasks),
 			"events":    len(events),
 			"handoffs":  len(handoffs),
@@ -199,6 +199,12 @@ func (s *Service) handoffSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	limit := intArgDefault(args, "max_results", 20)
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
 	records, err := s.listHandoffs(1000)
 	if err != nil {
 		return nil, err

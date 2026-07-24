@@ -152,6 +152,12 @@ func validatePresetString(arg PresetArg, s string) error {
 		}
 		return fmt.Errorf("arg %q is not in enum", arg.Name)
 	}
+	// Reject option-injection by default: a value beginning with '-' would be
+	// interpreted as a flag by the invoked binary. Presets that genuinely pass
+	// flags must opt in with allow_leading_dash.
+	if !arg.AllowLeadingDash && strings.HasPrefix(s, "-") {
+		return fmt.Errorf("arg %q must not begin with '-' (set allow_leading_dash to pass flags)", arg.Name)
+	}
 	if arg.Pattern != "" {
 		re, err := regexp.Compile(arg.Pattern)
 		if err != nil {
@@ -186,9 +192,10 @@ func toInt64(value any) (int64, error) {
 func validateCommandPlaceholders(label string, command []string, names map[string]bool) error {
 	for _, token := range command {
 		for _, name := range findPlaceholders(token) {
-			if name == "prompt" {
-				continue
-			}
+			// This validator is only invoked for presets. {prompt} is reserved
+			// for agent commands and can never be satisfied by a preset arg, so
+			// a preset must declare an arg of that name or the token is rejected
+			// rather than passing load and failing every execution.
 			if !names[name] {
 				return fmt.Errorf("%s uses unknown placeholder %q", label, name)
 			}

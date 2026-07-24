@@ -33,6 +33,10 @@ type AgentMessage struct {
 	JobID string    `json:"job_id,omitempty"`
 }
 
+// maxAgentMessageBytes caps a single stored message so one oversized turn can
+// never produce an NDJSON line the reader cannot scan back.
+const maxAgentMessageBytes = 256 * 1024
+
 func (s *Service) agentSessionStart(args map[string]any) (map[string]any, error) {
 	name := stringArg(args, "agent")
 	if name == "" {
@@ -145,34 +149,60 @@ func (s *Service) agentMessageSend(args map[string]any) (map[string]any, error) 
 			}
 		}
 		_ = s.appendAgentMessage(session.ID, AgentMessage{Time: time.Now().UTC(), Role: role, Text: text, JobID: rec.ID})
-		session.State = "active"
-		if rec.State == JobFailed || rec.State == JobCancelled {
-			session.State = string(rec.State)
-		}
-		session.LastJobID = rec.ID
-		session.UpdatedAt = time.Now().UTC()
-		_ = s.writeAgentSession(session)
+		_, _ = s.updateAgentSession(session.ID, func(cur *AgentSession) {
+			cur.State = "active"
+			if rec.State == JobFailed || rec.State == JobCancelled {
+				cur.State = string(rec.State)
+			}
+			cur.LastJobID = rec.ID
+		})
 	}
 	async := true
 	if raw, ok := args["async"].(bool); ok {
 		async = raw
 	}
-	session.State = "running"
-	session.UpdatedAt = time.Now().UTC()
-	if err := s.writeAgentSession(session); err != nil {
+	if _, err := s.updateAgentSession(session.ID, func(cur *AgentSession) {
+		cur.State = "running"
+	}); err != nil {
 		return nil, err
 	}
 	job, tail, err := s.jobs.RunCommand(contextWithBackground(), spec, async)
 	if err != nil {
 		return nil, err
 	}
-	session.LastJobID = job.ID
-	_ = s.writeAgentSession(session)
-	out := map[string]any{"session": session, "job": job}
+	// Record the job id even before an async job finishes, without clobbering a
+	// terminal state OnFinish may have already written (sync path).
+	latest, err := s.updateAgentSession(session.ID, func(cur *AgentSession) {
+		if cur.LastJobID == "" {
+			cur.LastJobID = job.ID
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"session": latest, "job": job}
 	if tail != "" {
 		out["logs_tail"] = tail
 	}
 	return out, nil
+}
+
+// updateAgentSession serializes a read-modify-write of a session record so the
+// OnFinish job goroutine and the request goroutine cannot race on the same
+// struct or clobber each other's write.
+func (s *Service) updateAgentSession(id string, mutate func(*AgentSession)) (AgentSession, error) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	session, err := s.readAgentSession(id)
+	if err != nil {
+		return AgentSession{}, err
+	}
+	mutate(&session)
+	session.UpdatedAt = time.Now().UTC()
+	if err := s.writeAgentSession(session); err != nil {
+		return AgentSession{}, err
+	}
+	return session, nil
 }
 
 func (s *Service) agentSessionStatus(args map[string]any) (map[string]any, error) {
@@ -209,8 +239,11 @@ func (s *Service) agentMessagesTail(args map[string]any) (map[string]any, error)
 
 func (s *Service) agentSessionList(args map[string]any) (map[string]any, error) {
 	limit := intArgDefault(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	dir := filepath.Join(s.cfg.StateDir, "agents", "sessions")
 	entries, err := os.ReadDir(dir)
@@ -282,6 +315,9 @@ func (s *Service) appendAgentMessage(sessionID string, msg AgentMessage) error {
 	if msg.Time.IsZero() {
 		msg.Time = time.Now().UTC()
 	}
+	if len(msg.Text) > maxAgentMessageBytes {
+		msg.Text = msg.Text[:maxAgentMessageBytes] + "\n[anigate: message truncated]"
+	}
 	dir := filepath.Join(s.cfg.StateDir, "agents", "messages")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -303,8 +339,11 @@ func (s *Service) readAgentMessages(sessionID string, limit int) ([]AgentMessage
 	if !validName(sessionID) {
 		return nil, fmt.Errorf("invalid session_id")
 	}
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	f, err := os.Open(filepath.Join(s.cfg.StateDir, "agents", "messages", sessionID+".ndjson"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -316,7 +355,7 @@ func (s *Service) readAgentMessages(sessionID string, limit int) ([]AgentMessage
 	defer f.Close()
 	var messages []AgentMessage
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner.Buffer(make([]byte, 4096), maxEventLineBytes)
 	for scanner.Scan() {
 		var msg AgentMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {

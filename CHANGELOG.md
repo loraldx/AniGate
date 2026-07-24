@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- Path confinement now rejects any resolved workspace path inside `state_dir`,
+  so a caller cannot reach publish tokens, job/task/artifact records, or the
+  audit stream through a workspace tool even when `state_dir` sits inside a
+  workspace root (as the shipped configs do). Closes the forge-state-records
+  vector behind the artifact arbitrary-read and forgeable publish token.
+- Fail closed when a task worktree's cleanliness cannot be verified:
+  `publish.preview` now surfaces git failures instead of treating them as a
+  clean tree.
+- Routed `project.ensure` maintenance commands (`remote set-url`, `fetch`)
+  through the sanitized runner so credentialed remote URLs cannot leak into
+  error messages.
+- Unified all git/gh helper subprocesses behind one runner with sanitized
+  errors; clone/fetch/push/gh now get a 120s network timeout instead of the
+  15s local bound.
+- Bound publish confirm tokens to the worktree HEAD they previewed; commits
+  landing after `publish.preview` invalidate the token. Token files are
+  written atomically and expired tokens are swept on the next preview.
+- Clamped out-of-range limit arguments to their documented maximums instead
+  of silently resetting to small defaults; capped `task.search` and
+  `handoff.search` results.
+- Oversized stdio frames now fail with a protocol error instead of killing
+  the server, matching HTTP per-request behavior.
+- `file.search` no longer stops matching silently after lines over 64 KiB.
+- `validName` rejects dot-only IDs, `audit.summary` reports the newest
+  failures, and `fs.write_preview` only treats genuinely missing files as
+  creatable.
+- HTTP mode shuts down gracefully on SIGINT/SIGTERM and exits 0.
+- JSON-RPC conformance: response `id` is always echoed, `resources/list` and
+  `prompts/list` return their empty collections, and `initialize` negotiates
+  the protocol version.
+- CI now runs `scripts/verify.sh` directly; releases verify the tag matches
+  `VERSION` and publish sha256 checksums.
+- Installer hardening: CSPRNG-only token generation, a dedicated default Max
+  workspace directory instead of the whole home directory, and a distinct
+  port (8789) for the legacy systemd unit.
+
 ## 0.2.0
 
 - Split AniGate into two product lines: `anigate-mini` for safe preview and

@@ -117,7 +117,7 @@ func (s *Service) doctorProjectChecks(project Project) []DoctorCheck {
 			checks = append(checks, doctorFail("project_"+project.Name+"_gh_available", "error", "gh executable not found in PATH", "install GitHub CLI"))
 		} else {
 			checks = append(checks, doctorOK("project_"+project.Name+"_gh_available", "gh executable is available"))
-			if _, err := runExternalOutput(rp.Abs, "gh", "auth", "status"); err != nil {
+			if _, err := runHostCommand(rp.Abs, hostCmdOpts{Timeout: gitNetworkTimeout}, "gh", "auth", "status"); err != nil {
 				checks = append(checks, doctorFail("project_"+project.Name+"_gh_auth", "error", "gh auth status failed", "run gh auth login"))
 			} else {
 				checks = append(checks, doctorOK("project_"+project.Name+"_gh_auth", "gh auth is configured"))

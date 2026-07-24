@@ -53,16 +53,17 @@ type Preset struct {
 }
 
 type PresetArg struct {
-	Name     string   `json:"name"`
-	Type     string   `json:"type"`
-	Required bool     `json:"required"`
-	Default  any      `json:"default"`
-	Enum     []string `json:"enum"`
-	Pattern  string   `json:"pattern"`
-	Min      *int64   `json:"min"`
-	Max      *int64   `json:"max"`
-	MaxLen   int      `json:"max_len"`
-	MaxItems int      `json:"max_items"`
+	Name             string   `json:"name"`
+	Type             string   `json:"type"`
+	Required         bool     `json:"required"`
+	Default          any      `json:"default"`
+	Enum             []string `json:"enum"`
+	Pattern          string   `json:"pattern"`
+	Min              *int64   `json:"min"`
+	Max              *int64   `json:"max"`
+	MaxLen           int      `json:"max_len"`
+	MaxItems         int      `json:"max_items"`
+	AllowLeadingDash bool     `json:"allow_leading_dash"`
 }
 
 type Agent struct {
@@ -355,13 +356,19 @@ func validName(s string) bool {
 	if s == "" {
 		return false
 	}
+	allDots := true
 	for _, r := range s {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			if r != '.' {
+				allDots = false
+			}
 			continue
 		}
 		return false
 	}
-	return true
+	// validName gates IDs before they are joined into state_dir paths; "." and
+	// ".." must never pass even if a future call site drops the file suffix.
+	return !allDots
 }
 
 func validEnvName(s string) bool {

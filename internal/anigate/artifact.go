@@ -35,8 +35,11 @@ type ArtifactRef struct {
 
 func (s *Service) artifactList(args map[string]any) (map[string]any, error) {
 	limit := intArgDefault(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	kind := stringArg(args, "kind")
 	records, err := s.listArtifacts(limit, kind)
@@ -99,8 +102,11 @@ func (s *Service) artifactSearch(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("query is required")
 	}
 	maxResults := intArgDefault(args, "max_results", 50)
-	if maxResults <= 0 || maxResults > 200 {
+	if maxResults <= 0 {
 		maxResults = 50
+	}
+	if maxResults > 200 {
+		maxResults = 200
 	}
 	caseSensitive := boolArg(args, "case_sensitive")
 	needle := query
@@ -228,7 +234,7 @@ func (s *Service) saveArtifactText(kind, name, text string, meta map[string]any)
 		text = text[:limit]
 	}
 	path := filepath.Join(dir, id+".txt")
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+	if err := writeFileAtomic(path, []byte(text), 0o600); err != nil {
 		return ArtifactRecord{}, err
 	}
 	rec := ArtifactRecord{
@@ -245,7 +251,7 @@ func (s *Service) saveArtifactText(kind, name, text string, meta map[string]any)
 	if err != nil {
 		return ArtifactRecord{}, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, id+".json"), b, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, id+".json"), b, 0o600); err != nil {
 		return ArtifactRecord{}, err
 	}
 	s.events.Append(Event{Kind: "artifact_created", OK: true, Fields: map[string]any{"artifact_id": id, "kind": kind, "name": name}})
@@ -292,9 +298,11 @@ func (s *Service) readArtifactRecord(id string) (ArtifactRecord, error) {
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return ArtifactRecord{}, err
 	}
-	if rec.Path == "" || !filepath.IsAbs(rec.Path) {
-		return ArtifactRecord{}, fmt.Errorf("artifact record has invalid path")
-	}
+	// Never trust the stored Path: artifact content always lives at
+	// <state_dir>/artifacts/<id>.txt. Reconstructing it from the validated id
+	// stops a forged record's Path (writable if state_dir sits inside a
+	// workspace) from escaping into an arbitrary os.Open outside confinement.
+	rec.Path = filepath.Join(s.cfg.StateDir, "artifacts", id+".txt")
 	return rec, nil
 }
 

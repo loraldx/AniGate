@@ -14,33 +14,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
-      - run: go mod verify
-      - run: go test ./...
-      - run: go vet ./...
-      - run: go test -race ./...
-      - run: go build -trimpath -o bin/anigate-mini ./cmd/anigate-mini
-      - run: go build -trimpath -o bin/anigate-max ./cmd/anigate-max
-      - run: go build -trimpath -o bin/anigate ./cmd/anigate
-      - name: Check Mini tool surface
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./bin/anigate-mini tools --config configs/anigate.mini.example.json > /tmp/anigate-mini-tools
-          test "$(awk 'NF { count++ } END { print count + 0 }' /tmp/anigate-mini-tools)" -eq 21
-          ! grep -E '^(agent\.|publish\.|file\.edit_apply|patch\.apply|app\.run_preset|job\.|project\.|task\.|audit\.|workspace\.snapshot|gate\.)' /tmp/anigate-mini-tools
-      - name: Check Max tool surface
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./bin/anigate-max tools --config configs/anigate.max.example.json > /tmp/anigate-max-tools
-          test "$(awk 'NF { count++ } END { print count + 0 }' /tmp/anigate-max-tools)" -eq 56
-          grep -q '^file\.edit_apply[[:space:]]' /tmp/anigate-max-tools
-          grep -q '^patch\.apply[[:space:]]' /tmp/anigate-max-tools
-          grep -q '^agent\.message_send[[:space:]]' /tmp/anigate-max-tools
-          grep -q '^publish\.preview[[:space:]]' /tmp/anigate-max-tools
-      - name: Check legacy alias
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./bin/anigate tools --config configs/anigate.example.json > /tmp/anigate-tools
-          test "$(awk 'NF { count++ } END { print count + 0 }' /tmp/anigate-tools)" -eq 56
+      # scripts/verify.sh is the single source of truth for the quality gate:
+      # mod verify, tests, vet, race, three builds, tool-surface assertions,
+      # and the HTTP MCP smoke test. Keep the assertions there, not here.
+      - name: Run verify
+        run: ./scripts/verify.sh

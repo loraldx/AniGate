@@ -2,6 +2,7 @@ package anigate
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,7 @@ type rpcRequest struct {
 
 type rpcResponse struct {
 	JSONRPC string    `json:"jsonrpc"`
-	ID      any       `json:"id,omitempty"`
+	ID      any       `json:"id"` // always echoed; null when the request id is unknown (spec-required for parse errors)
 	Result  any       `json:"result,omitempty"`
 	Error   *rpcError `json:"error,omitempty"`
 }
@@ -49,30 +50,59 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
+const maxStdioLineBytes = 10 * 1024 * 1024
+
 func ServeStdio(r io.Reader, w io.Writer, svc *Service, log *slog.Logger) int {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024), 10*1024*1024)
+	reader := bufio.NewReaderSize(r, 64*1024)
 	bw := bufio.NewWriter(w)
 	defer bw.Flush()
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	for {
+		line, tooLong, err := readBoundedLine(reader, maxStdioLineBytes)
+		if tooLong {
+			// An oversized frame fails on its own; the server keeps serving
+			// instead of dying (parity with the per-request HTTP behavior).
+			resp := rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "request frame exceeds size limit"}}
+			if werr := writeRPC(bw, resp); werr != nil {
+				log.Error("write rpc", "err", werr)
+				return 1
+			}
+		} else if len(line) > 0 {
+			if resp, ok := dispatchJSON(line, svc); ok {
+				if werr := writeRPC(bw, resp); werr != nil {
+					log.Error("write rpc", "err", werr)
+					return 1
+				}
+			}
 		}
-		resp, ok := dispatchJSON(line, svc)
-		if !ok {
-			continue
+		if err == io.EOF {
+			return 0
 		}
-		if err := writeRPC(bw, resp); err != nil {
-			log.Error("write rpc", "err", err)
+		if err != nil {
+			log.Error("read stdin", "err", err)
 			return 1
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		log.Error("read stdin", "err", err)
-		return 1
+}
+
+// readBoundedLine returns the next newline-delimited frame without its
+// trailing newline. Frames over limit are discarded in full and reported via
+// tooLong; err is io.EOF once the input is exhausted.
+func readBoundedLine(r *bufio.Reader, limit int) (line []byte, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		if !tooLong {
+			buf = append(buf, chunk...)
+			if len(buf) > limit {
+				tooLong = true
+				buf = nil
+			}
+		}
+		if rerr == bufio.ErrBufferFull {
+			continue
+		}
+		return bytes.TrimRight(buf, "\r\n"), tooLong, rerr
 	}
-	return 0
 }
 
 func dispatchJSON(b []byte, svc *Service) (rpcResponse, bool) {
@@ -91,7 +121,7 @@ func dispatch(req rpcRequest, svc *Service) rpcResponse {
 	switch req.Method {
 	case "initialize":
 		resp.Result = map[string]any{
-			"protocolVersion": "2025-06-18",
+			"protocolVersion": negotiateProtocolVersion(req.Params),
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
@@ -113,12 +143,28 @@ func dispatch(req rpcRequest, svc *Service) rpcResponse {
 		result, err := svc.CallTool(params.Name, params.Arguments)
 		tr := encodeToolResult(result, err)
 		resp.Result = tr
-	case "resources/list", "prompts/list":
-		resp.Result = map[string]any{}
+	case "resources/list":
+		resp.Result = map[string]any{"resources": []any{}}
+	case "prompts/list":
+		resp.Result = map[string]any{"prompts": []any{}}
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 	}
 	return resp
+}
+
+// negotiateProtocolVersion echoes the client's requested MCP protocol version
+// when the server supports it, otherwise answers with the latest supported one.
+func negotiateProtocolVersion(params json.RawMessage) string {
+	const latest = "2025-06-18"
+	supported := map[string]bool{"2024-11-05": true, "2025-03-26": true, latest: true}
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if len(params) > 0 && json.Unmarshal(params, &p) == nil && supported[p.ProtocolVersion] {
+		return p.ProtocolVersion
+	}
+	return latest
 }
 
 func encodeToolResult(result any, err error) toolResult {

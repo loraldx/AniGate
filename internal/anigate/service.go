@@ -1,7 +1,6 @@
 package anigate
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +21,7 @@ type Service struct {
 	jobs        *JobManager
 	events      *EventLog
 	log         *slog.Logger
+	sessionMu   sync.Mutex
 }
 
 func NewService(cfg Config, log *slog.Logger) (*Service, error) {
@@ -36,11 +37,11 @@ func NewServiceWithProductLine(cfg Config, log *slog.Logger, productLine Product
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	events, err := NewEventLog(cfg.StateDir)
+	events, err := NewEventLog(cfg.StateDir, log)
 	if err != nil {
 		return nil, err
 	}
-	policy := newPathPolicy(cfg.Workspaces)
+	policy := newPathPolicy(cfg.Workspaces, cfg.StateDir)
 	jobs, err := NewJobManager(cfg, policy, events, log)
 	if err != nil {
 		return nil, err
@@ -321,6 +322,12 @@ func (s *Service) CallTool(name string, raw json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
+	if err := s.requireToolForProduct(name); err != nil {
+		ev := Event{Kind: "tool_call", Tool: name, OK: false, Message: errorString(err)}
+		enrichToolCallEvent(&ev, args)
+		s.events.Append(ev)
+		return nil, err
+	}
 	var result any
 	var err error
 	switch name {
@@ -439,8 +446,36 @@ func (s *Service) CallTool(name string, raw json.RawMessage) (any, error) {
 	default:
 		err = fmt.Errorf("unknown tool %q", name)
 	}
-	s.events.Append(Event{Kind: "tool_call", Tool: name, OK: err == nil, Message: errorString(err)})
+	ev := Event{Kind: "tool_call", Tool: name, OK: err == nil, Message: errorString(err)}
+	if err != nil {
+		enrichToolCallEvent(&ev, args)
+	}
+	s.events.Append(ev)
 	return result, err
+}
+
+// enrichToolCallEvent attaches the caller-supplied workspace, path, and common
+// identifiers to a failed tool-call audit event so gate rejections and
+// path-escape probes are attributable during forensic review.
+func enrichToolCallEvent(ev *Event, args map[string]any) {
+	if args == nil {
+		return
+	}
+	if ws := stringArg(args, "workspace"); ws != "" {
+		ev.Workspace = ws
+	}
+	if p := stringArg(args, "path"); p != "" {
+		ev.Path = p
+	}
+	fields := map[string]any{}
+	for _, key := range []string{"project", "task_id", "session_id", "name"} {
+		if v := stringArg(args, key); v != "" {
+			fields[key] = v
+		}
+	}
+	if len(fields) > 0 {
+		ev.Fields = fields
+	}
 }
 
 func (s *Service) sysInfo() (map[string]any, error) {
@@ -494,8 +529,11 @@ func (s *Service) fsList(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	maxEntries := intArgDefault(args, "max_entries", 100)
-	if maxEntries <= 0 || maxEntries > 500 {
+	if maxEntries <= 0 {
 		maxEntries = 100
+	}
+	if maxEntries > 500 {
+		maxEntries = 500
 	}
 	entries, err := os.ReadDir(rp.Abs)
 	if err != nil {
@@ -603,8 +641,11 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	maxResults := intArgDefault(args, "max_results", s.cfg.MaxSearchResults)
-	if maxResults <= 0 || maxResults > 200 {
+	if maxResults <= 0 {
 		maxResults = s.cfg.MaxSearchResults
+	}
+	if maxResults > 200 {
+		maxResults = 200
 	}
 	caseSensitive := boolArg(args, "case_sensitive")
 	needle := query
@@ -624,6 +665,14 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 			}
 			return nil
 		}
+		// Skip symlinks: WalkDir Lstats entries, so a link's own size passes the
+		// byte guard while os.ReadFile would follow it and read the target's
+		// contents — an out-of-tree link (e.g. -> /etc/passwd) would bypass path
+		// confinement. Every other content reader routes through policy.resolve,
+		// which rejects such escapes; file.search must not be the exception.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil || info.Size() > s.cfg.MaxSearchFileBytes {
 			return nil
@@ -633,11 +682,13 @@ func (s *Service) fileSearch(args map[string]any) (map[string]any, error) {
 			return nil
 		}
 		scanned++
-		lines := bufio.NewScanner(strings.NewReader(string(b)))
+		// The file is already fully in memory (bounded by MaxSearchFileBytes);
+		// split directly so lines beyond bufio.Scanner's 64 KiB token limit
+		// cannot silently stop the scan mid-file.
 		lineNo := 0
-		for lines.Scan() {
+		for _, line := range strings.Split(string(b), "\n") {
 			lineNo++
-			line := lines.Text()
+			line = strings.TrimSuffix(line, "\r")
 			hay := line
 			if !caseSensitive {
 				hay = strings.ToLower(line)

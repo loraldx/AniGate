@@ -79,7 +79,46 @@ func NewJobManager(cfg Config, policy pathPolicy, events *EventLog, log *slog.Lo
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "logs"), 0o700); err != nil {
 		return nil, err
 	}
-	return &JobManager{cfg: cfg, policy: policy, events: events, log: log, active: map[string]context.CancelFunc{}}, nil
+	m := &JobManager{cfg: cfg, policy: policy, events: events, log: log, active: map[string]context.CancelFunc{}}
+	m.reconcileInterruptedJobs()
+	return m, nil
+}
+
+// reconcileInterruptedJobs finalizes jobs left in "running" by a previous
+// process. A freshly constructed manager has an empty active map, so any
+// on-disk "running" record is an orphan from a crash/restart and can never be
+// finalized or cancelled otherwise. It is marked failed so status, cancel, and
+// context-health counters stop reporting a phantom running job.
+func (m *JobManager) reconcileInterruptedJobs() {
+	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		rec, err := m.Status(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil || rec.State != JobRunning {
+			continue
+		}
+		rec.State = JobFailed
+		rec.Error = "interrupted: anigate process restarted"
+		rec.ExitCode = -1
+		rec.FinishedAt = time.Now().UTC()
+		if err := m.writeRecord(rec); err != nil {
+			continue
+		}
+		_ = m.events.Append(Event{
+			Kind:      "job_finished",
+			JobID:     rec.ID,
+			Preset:    rec.Preset,
+			Workspace: rec.Workspace,
+			OK:        false,
+			Message:   rec.Error,
+			Fields:    map[string]any{"task_id": rec.TaskID, "reconciled": true},
+		})
+	}
 }
 
 func (m *JobManager) RunPreset(ctx context.Context, name string, args map[string]any, async bool) (JobRecord, string, error) {
@@ -113,6 +152,12 @@ func (m *JobManager) RunPreset(ctx context.Context, name string, args map[string
 }
 
 func (m *JobManager) RunCommand(ctx context.Context, spec JobSpec, async bool) (JobRecord, string, error) {
+	// An empty argv would panic run() at spec.Command[0]; for async jobs that
+	// panic is unrecovered (context.Background goroutine) and crashes the
+	// process. Reject it here so it surfaces as a tool error instead.
+	if len(spec.Command) == 0 || spec.Command[0] == "" {
+		return JobRecord{}, "", fmt.Errorf("command rendered to an empty argv")
+	}
 	job, err := m.newRecord(spec)
 	if err != nil {
 		return JobRecord{}, "", err
@@ -149,8 +194,11 @@ func (m *JobManager) Status(id string) (JobRecord, error) {
 }
 
 func (m *JobManager) List(limit int, state JobState) ([]JobRecord, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
 	}
 	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -183,6 +231,35 @@ func (m *JobManager) List(limit int, state JobState) ([]JobRecord, error) {
 	return jobs, nil
 }
 
+// Count returns the number of job records (optionally filtered by state)
+// without the per-call limit clamp that List applies, so internal aggregators
+// (context.health, gate.stats) report accurate totals.
+func (m *JobManager) Count(state JobState) (int, error) {
+	entries, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "jobs"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if state == "" {
+			count++
+			continue
+		}
+		rec, err := m.Status(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil || rec.State != state {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 func (m *JobManager) Cancel(id string) (JobRecord, error) {
 	if !validName(id) {
 		return JobRecord{}, errors.New("invalid job id")
@@ -213,8 +290,11 @@ func (m *JobManager) LogsTail(id string, maxBytes int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if maxBytes <= 0 || maxBytes > m.cfg.MaxJobLogBytes {
+	if maxBytes <= 0 {
 		maxBytes = 4096
+	}
+	if maxBytes > m.cfg.MaxJobLogBytes {
+		maxBytes = m.cfg.MaxJobLogBytes
 	}
 	f, err := os.Open(rec.LogPath)
 	if err != nil {
@@ -303,6 +383,10 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 		rec.Error = err.Error()
 		rec.FinishedAt = time.Now().UTC()
 		_ = m.writeRecord(rec)
+		// Mirror the success path's finish bookkeeping: without the event and
+		// OnFinish, the job_started/job_finished pairing breaks and an agent
+		// session that relies on OnFinish stays wedged in "running" forever.
+		m.finishJob(rec, spec)
 		return rec
 	}
 	defer logFile.Close()
@@ -345,6 +429,14 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 		_, _ = fmt.Fprintln(logFile, "\n[anigate: log truncated]")
 	}
 	_ = m.writeRecord(rec)
+	m.finishJob(rec, spec)
+	return rec
+}
+
+// finishJob emits the job_finished audit event and runs the OnFinish hook.
+// Both the normal completion path and the early log-open failure path call it
+// so the audit start/finish pairing and the session-state reset never diverge.
+func (m *JobManager) finishJob(rec JobRecord, spec JobSpec) {
 	m.events.Append(Event{
 		Kind:      "job_finished",
 		Tool:      spec.EventTool,
@@ -358,7 +450,6 @@ func (m *JobManager) run(parent context.Context, spec JobSpec, rec JobRecord) Jo
 	if spec.OnFinish != nil {
 		spec.OnFinish(rec)
 	}
-	return rec
 }
 
 func (m *JobManager) buildEnv(extra map[string]string) []string {
