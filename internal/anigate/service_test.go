@@ -327,7 +327,7 @@ func TestGitStatusAndDiff(t *testing.T) {
 func TestGitLogShowAndPatchApply(t *testing.T) {
 	svc, root := testService(t)
 	svc.cfg.Workspaces[0].ReadOnly = false
-	svc.policy = newPathPolicy(svc.cfg.Workspaces)
+	svc.policy = newPathPolicy(svc.cfg.Workspaces, svc.cfg.StateDir)
 	runGitForTest(t, root, "init")
 	runGitForTest(t, root, "config", "user.email", "test@example.com")
 	runGitForTest(t, root, "config", "user.name", "Tester")
@@ -400,7 +400,7 @@ func TestMiniReaderAllowsPreviewButRejectsMutation(t *testing.T) {
 	svc, root := testService(t)
 	ws := Workspace{Name: "test", Path: root, ReadOnly: true, Profile: "reader"}
 	svc.cfg.Workspaces = []Workspace{ws}
-	svc.policy = newPathPolicy(svc.cfg.Workspaces)
+	svc.policy = newPathPolicy(svc.cfg.Workspaces, svc.cfg.StateDir)
 	svc.jobs.policy = svc.policy
 
 	preview, err := svc.fsWritePreview(map[string]any{"workspace": "test", "path": "hello.txt", "content": "preview\n"})

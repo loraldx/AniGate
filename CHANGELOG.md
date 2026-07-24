@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Path confinement now rejects any resolved workspace path inside `state_dir`,
+  so a caller cannot reach publish tokens, job/task/artifact records, or the
+  audit stream through a workspace tool even when `state_dir` sits inside a
+  workspace root (as the shipped configs do). Closes the forge-state-records
+  vector behind the artifact arbitrary-read and forgeable publish token.
 - Fail closed when a task worktree's cleanliness cannot be verified:
   `publish.preview` now surfaces git failures instead of treating them as a
   clean tree.

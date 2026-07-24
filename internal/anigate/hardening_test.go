@@ -650,6 +650,36 @@ func TestJobFinishBookkeepingOnLogOpenFailure(t *testing.T) {
 	}
 }
 
+// Issue #56: state_dir must not be reachable through a workspace, so a caller
+// cannot forge publish tokens / job / task / artifact / audit records even when
+// state_dir physically sits inside a workspace root (as the shipped configs do).
+func TestStateDirNotReachableThroughWorkspace(t *testing.T) {
+	svc, _ := testService(t)
+	// The fixture's state_dir (<root>/state) sits inside the workspace (<root>),
+	// mirroring configs/anigate.max.example.json.
+	inside := []string{
+		"state/publish_tokens/forged.json",
+		"state/events.ndjson",
+		"state",
+	}
+	for _, p := range inside {
+		if _, err := svc.policy.resolve("test", p); err == nil {
+			t.Fatalf("expected resolve to reject state-dir path %q", p)
+		}
+	}
+	// Through the write tool with a writable workspace it must also be blocked.
+	svc.cfg.Workspaces[0].ReadOnly = false
+	svc.policy = newPathPolicy(svc.cfg.Workspaces, svc.cfg.StateDir)
+	svc.jobs.policy = svc.policy
+	if _, err := svc.fileEditApply(map[string]any{"workspace": "test", "path": "state/publish_tokens/forged.json", "content": "{}", "create": true}); err == nil {
+		t.Fatal("file.edit_apply into state_dir must be rejected")
+	}
+	// A normal workspace path still resolves.
+	if _, err := svc.policy.resolve("test", "hello.txt"); err != nil {
+		t.Fatalf("normal path should still resolve: %v", err)
+	}
+}
+
 // publishFixture builds a service around a real single-commit git repo with a
 // task record pointing at it, for exercising the publish token flow locally.
 func publishFixture(t *testing.T) (*Service, TaskRecord, string) {

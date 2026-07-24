@@ -9,6 +9,11 @@ import (
 
 type pathPolicy struct {
 	workspaces map[string]Workspace
+	// stateDir is the resolved gateway state directory. Any workspace path that
+	// lands inside it is rejected, so a caller cannot reach state_dir through a
+	// workspace (e.g. to forge publish tokens, job/task/artifact records, or the
+	// audit stream) even when state_dir physically sits inside a workspace root.
+	stateDir string
 }
 
 type resolvedPath struct {
@@ -17,12 +22,29 @@ type resolvedPath struct {
 	Rel       string    `json:"rel"`
 }
 
-func newPathPolicy(workspaces []Workspace) pathPolicy {
+func newPathPolicy(workspaces []Workspace, stateDir string) pathPolicy {
 	m := make(map[string]Workspace, len(workspaces))
 	for _, ws := range workspaces {
 		m[ws.Name] = ws
 	}
-	return pathPolicy{workspaces: m}
+	return pathPolicy{workspaces: m, stateDir: resolveStateDir(stateDir)}
+}
+
+// resolveStateDir returns the absolute, symlink-resolved state directory used
+// for the confinement check. Best-effort: an unresolvable value falls back to
+// the lexical absolute path so the check still applies.
+func resolveStateDir(stateDir string) string {
+	if stateDir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(stateDir)
+	if err != nil {
+		return filepath.Clean(stateDir)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 func (p pathPolicy) workspace(name string) (Workspace, error) {
@@ -79,7 +101,23 @@ func (p pathPolicy) resolve(workspaceName, requested string) (resolvedPath, erro
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return resolvedPath{}, fmt.Errorf("path escapes workspace %q", ws.Name)
 	}
+	if p.insideStateDir(candidate) {
+		return resolvedPath{}, fmt.Errorf("path is inside the gateway state directory")
+	}
 	return resolvedPath{Workspace: ws, Abs: candidate, Rel: rel}, nil
+}
+
+// insideStateDir reports whether the resolved candidate is the state directory
+// or a path under it.
+func (p pathPolicy) insideStateDir(candidate string) bool {
+	if p.stateDir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(p.stateDir, candidate)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolveDeepestExisting resolves the symlinks of the deepest existing ancestor

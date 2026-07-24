@@ -41,7 +41,7 @@ func NewServiceWithProductLine(cfg Config, log *slog.Logger, productLine Product
 	if err != nil {
 		return nil, err
 	}
-	policy := newPathPolicy(cfg.Workspaces)
+	policy := newPathPolicy(cfg.Workspaces, cfg.StateDir)
 	jobs, err := NewJobManager(cfg, policy, events, log)
 	if err != nil {
 		return nil, err
